@@ -18,3 +18,9 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build
+    - name: Upload build
+    - uses: actions/upload-artifact@v4
+      with:
+          name: hachimi-dll
+          path: '**/target/debug/hachimi.dll'
+          if-no-files-found: error
