@@ -4,23 +4,21 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main" ]  
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
     runs-on: windows-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build
-    - name: Upload build
-    - uses: actions/upload-artifact@v4
-      with:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
           name: hachimi-dll
-          path: '**/target/debug/hachimi.dll'
-          if-no-files-found: error
+          path: target/debug/hachimi.dll
+          if-no-files-found: errorw
