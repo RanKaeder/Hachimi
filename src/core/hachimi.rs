@@ -169,7 +169,14 @@ impl Hachimi {
                 return;
             }
         };
+        
         self.localized_data.store(Arc::new(new_data));
+        
+        // 只有在 IL2CPP 初始化完成后才尝试加载 mods AssetBundles
+        if self.hooking_finished.load(atomic::Ordering::Relaxed) {
+            use crate::il2cpp::ext::LocalizedDataExt;
+            let _mods_bundles = self.localized_data.load().load_mods_asset_bundles();
+        }
     }
 
     pub fn on_dlopen(&self, filename: &str, handle: usize) -> bool {
@@ -218,6 +225,10 @@ impl Hachimi {
                 info!("Plugin init failed");
             }
         }
+
+        // 现在 IL2CPP 已经完全初始化，可以安全地扫描和加载 mods AssetBundles
+        use crate::il2cpp::ext::LocalizedDataExt;
+        let _mods_bundles = self.localized_data.load().load_mods_asset_bundles();
     }
 
     pub fn get_data_path<P: AsRef<Path>>(&self, rel_path: P) -> PathBuf {
