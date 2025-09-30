@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use widestring::Utf16Str;
 
 use crate::{core::{ext::Utf16StringExt, hachimi::AssetMetadata}, il2cpp::{
-    api::il2cpp_resolve_icall, ext::{Il2CppObjectExt, Il2CppStringExt, StringExt}, hook::{
+    api::il2cpp_resolve_icall, ext::{Il2CppObjectExt, Il2CppStringExt}, hook::{
         umamusume::{StoryRaceTextAsset, StoryTimelineData, TextDotData, TextRubyData},
         Cute_UI_Assembly::AtlasReference,
         UnityEngine_CoreModule::{GameObject, Texture2D}
@@ -152,15 +152,6 @@ pub fn LoadFromFile_Internal_orig(path: *mut Il2CppString, crc: u32, offset: u64
     get_orig_fn!(LoadFromFile_Internal, LoadFromFileInternalFn)(path, crc, offset)
 }
 
-type LoadFromStreamInternalFn = extern "C" fn(stream: *mut Il2CppObject, crc: u32, managed_read_buffer_size: u32) -> *mut Il2CppObject;
-extern "C" fn LoadFromStream_Internal(stream: *mut Il2CppObject, crc: u32, managed_read_buffer_size: u32) -> *mut Il2CppObject {
-    let bundle = get_orig_fn!(LoadFromStream_Internal, LoadFromStreamInternalFn)(stream, crc, managed_read_buffer_size);
-    if !bundle.is_null() {
-        BUNDLE_PATHS.lock().unwrap().insert(bundle as usize, GCHandle::new( "sussy".to_il2cpp_string() as _, false));
-    }
-    bundle
-}
-
 type UnloadFn = extern "C" fn(this: *mut Il2CppObject, unload_all_loaded_objects: bool);
 extern "C" fn Unload(this: *mut Il2CppObject, unload_all_loaded_objects: bool) {
     BUNDLE_PATHS.lock().unwrap().remove(&(this as usize));
@@ -179,9 +170,6 @@ pub fn init(_UnityEngine_AssetBundleModule: *const Il2CppImage) {
     let LoadFromFile_Internal_addr = il2cpp_resolve_icall(
         c"UnityEngine.AssetBundle::LoadFromFile_Internal(System.String,System.UInt32,System.UInt64)".as_ptr()
     );
-    let LoadFromStream_Internal_addr = il2cpp_resolve_icall(
-        c"UnityEngine.AssetBundle::LoadFromStreamInternal(System.IO.Stream,System.UInt32,System.UInt32)".as_ptr());
-
     let Unload_addr = il2cpp_resolve_icall(
         c"UnityEngine.AssetBundle::Unload(System.Boolean)".as_ptr()
     );
@@ -189,6 +177,5 @@ pub fn init(_UnityEngine_AssetBundleModule: *const Il2CppImage) {
     new_hook!(LoadAsset_Internal_addr, LoadAsset_Internal);
     new_hook!(LoadAssetAsync_Internal_addr, LoadAssetAsync_Internal);
     new_hook!(LoadFromFile_Internal_addr, LoadFromFile_Internal);
-    new_hook!(LoadFromStream_Internal_addr, LoadFromStream_Internal);
     new_hook!(Unload_addr, Unload);
 }
