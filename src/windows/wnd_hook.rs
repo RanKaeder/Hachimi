@@ -31,14 +31,20 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
     match umsg {
         // Check for Home key presses
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            if wparam.0 as u16 == Hachimi::instance().config.load().windows.menu_open_key {
+            let hachimi = Hachimi::instance();
+            let menu_key = hachimi.config.load().windows.menu_open_key;
+            
+            if wparam.0 as u16 == menu_key {
+                // Lazy init GUI if not already initialized (for late loading mode)
+                hachimi.try_lazy_init_gui();
+                
                 let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
                     return unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
                 };
 
                 gui.toggle_menu();
                 return LRESULT(0);
-            }else if wparam.0 as u16 == Hachimi::instance().config.load().windows.hide_ingame_ui_hotkey_bind {
+            }else if wparam.0 as u16 == hachimi.config.load().windows.hide_ingame_ui_hotkey_bind {
                 Thread::main_thread().schedule(Gui::toggle_game_ui);
             }
         },
