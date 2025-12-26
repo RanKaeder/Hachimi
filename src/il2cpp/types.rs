@@ -3054,6 +3054,31 @@ pub struct CharacterSystemText {
     _cueSheetString: *mut Il2CppString
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RenderTextureDescriptor {
+    pub width: i32,
+    pub height: i32,
+    pub msaaSamples: i32,
+    pub volumeDepth: i32,
+    pub mipCount: i32,
+    pub graphicsFormat: i32,
+    pub stencilFormat: i32,
+    pub depthStencilFormat: i32,
+    pub colorFormat: i32,
+    pub sRGB: bool,
+    pub depthBufferBits: i32,
+    pub dimension: i32,
+    pub shadowSamplingMode: i32,
+    pub vrUsage: i32,
+    pub memoryless: i32,
+    pub useMipMap: bool,
+    pub autoGenerateMips: bool,
+    pub enableRandomWrite: bool,
+    pub bindMS: bool,
+    pub useDynamicScale: bool
+}
+
 /************** ACTk (READ-ONLY) **************/
 #[repr(C)]
 #[derive(Default, Debug)]

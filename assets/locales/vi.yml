@@ -115,6 +115,7 @@ config_editor:
   target_fps: "Đặt FPS"
   virtual_resolution_multiplier: "Số nhân độ\nphân giải ảo"
   ui_scale: "Tỷ lệ UI"
+  gui_scale: "Tỷ lệ lớp phủ"
   graphics_quality: "Chất lượng đồ họa"
   vsync: "VSync"
   auto_full_screen: "Tự động toàn màn hình"
@@ -137,6 +138,10 @@ config_editor:
     Tùy chọn này cho phép phím tắt để bật/tắt giao diện người dùng (UI) trong trò chơi.
     Đối với Android, đó là nhấn hai lần phím Tăng âm lượng (Volume Up) trong vòng 0,3 giây.
     Đối với PC/Android có bàn phím, đó là phím Insert (Phím Chèn). Phím này cũng có thể được thay đổi trong tệp cấu hình (config file).
+  menu_open_key: "Phím tắt mở menu"
+  menu_open_key_set: "Nhấn để thiết lập"
+  render_scale: "Tỷ lệ kết xuất"
+  aniso_level: "Lọc dị hướng"
 
 tl_update_dialog:
   title: "Bản cập nhật mới"

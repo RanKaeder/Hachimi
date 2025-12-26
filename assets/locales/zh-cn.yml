@@ -132,6 +132,7 @@ config_editor:
   target_fps: "目标帧率"
   virtual_resolution_multiplier: "分辨率缩放倍数"
   ui_scale: "界面缩放比例"
+  gui_scale: "叠加层缩放"
   ui_animation_scale: "UI 动画速度"
   graphics_quality: "图形质量"
   vsync: "垂直同步"
@@ -158,6 +159,8 @@ config_editor:
     PC或带键盘的Android中此快捷键为 Insert 键。该快捷键也可以在配置文件中更改。
   menu_open_key: "打开菜单按键"
   menu_open_key_set: "按下以设置"
+  render_scale: "渲染比例"
+  aniso_level: "各向异性过滤"
 
 tl_update_dialog:
   title: "新翻译更新可用"

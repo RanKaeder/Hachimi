@@ -328,8 +328,16 @@ pub struct Config {
     pub disable_auto_update_check: bool,
     #[serde(default)]
     pub disable_translations: bool,
+    #[serde(default = "Config::default_gui_scale")]
+    pub gui_scale: f32,
     #[serde(default = "Config::default_ui_scale")]
     pub ui_scale: f32,
+    #[serde(default = "Config::default_render_scale")]
+    pub render_scale: f32,
+    #[serde(default)]
+    pub msaa: crate::il2cpp::hook::umamusume::GraphicSettings::MsaaQuality,
+    #[serde(default)]
+    pub aniso_level: crate::il2cpp::hook::UnityEngine_CoreModule::Texture::AnisoLevel,
     #[serde(default)]
     pub graphics_quality: crate::il2cpp::hook::umamusume::GraphicSettings::GraphicsQuality,
     #[serde(default = "Config::default_story_choice_auto_select_delay")]
@@ -380,6 +388,8 @@ impl Config {
     fn default_open_browser_url() -> String { "https://www.google.com/".to_owned() }
     fn default_virtual_res_mult() -> f32 { 1.0 }
     fn default_ui_scale() -> f32 { 1.0 }
+    fn default_render_scale() -> f32 { 1.0 }
+    fn default_gui_scale() -> f32 { 1.0 }
     fn default_story_choice_auto_select_delay() -> f32 { 1.2 }
     fn default_story_tcps_multiplier() -> f32 { 3.0 }
     fn default_meta_index_url() -> String { "https://gitlab.com/umatl/hachimi-meta/-/raw/main/meta.json".to_owned() }

@@ -136,6 +136,7 @@ config_editor:
   target_fps: "FPS objetivo"
   virtual_resolution_multiplier: "Multiplicador de\nresolución virtual"
   ui_scale: "Escala del UI"
+  gui_scale: "Escala de la superposición"
   ui_animation_scale: "Escala de\nanimación del UI"
   graphics_quality: "Calidad gráfica"
   vsync: "VSync"
@@ -164,6 +165,8 @@ config_editor:
   discord_rpc: "Discord RPC"
   menu_open_key: "Tecla para abrir menú"
   menu_open_key_set: "Establecer"
+  render_scale: "Escala de renderizado"
+  aniso_level: "Filtrado anisotrópico"
 
 tl_update_dialog:
   title: "Nueva actualización disponible"

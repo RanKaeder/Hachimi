@@ -133,6 +133,7 @@ config_editor:
   target_fps: "Target FPS"
   virtual_resolution_multiplier: "Virtual resolution\nmultiplier"
   ui_scale: "UI scale"
+  gui_scale: "Overlay scale"
   ui_animation_scale: "UI animation scale"
   graphics_quality: "Graphics quality"
   vsync: "VSync"
@@ -160,6 +161,9 @@ config_editor:
   discord_rpc: "Discord RPC"
   menu_open_key: "Open menu hotkey"
   menu_open_key_set: "Press to set"
+  msaa: "MSAA"
+  render_scale: "Render Scale"
+  aniso_level: "Anisotropic Filtering"
 
 tl_update_dialog:
   title: "New update available"

@@ -1,5 +1,6 @@
 use std::{borrow::Cow, ops::RangeInclusive, sync::{atomic::{self, AtomicBool}, Arc, Mutex}, thread, time::Instant};
 
+use egui_scale::EguiScale;
 use fnv::FnvHashSet;
 use once_cell::sync::OnceCell;
 use rust_i18n::t;
@@ -7,8 +8,8 @@ use chrono::{Utc, Datelike};
 
 use crate::il2cpp::{
     hook::{
-        umamusume::{CySpringController::SpringUpdateMode, GameSystem, GraphicSettings::GraphicsQuality, Localize},
-        UnityEngine_CoreModule::Application
+        umamusume::{CySpringController::SpringUpdateMode, GameSystem, GraphicSettings::{GraphicsQuality, MsaaQuality}, Localize},
+        UnityEngine_CoreModule::{Application, Texture::AnisoLevel}
     },
     symbols::Thread
 };
@@ -25,7 +26,7 @@ macro_rules! add_font {
     ($fonts:expr, $family_fonts:expr, $filename:literal) => {
         $fonts.font_data.insert(
             $filename.to_owned(),
-            egui::FontData::from_static(include_bytes!(concat!("../../assets/fonts/", $filename)))
+            egui::FontData::from_static(include_bytes!(concat!("../../assets/fonts/", $filename))).into()
         );
         $family_fonts.push($filename.to_owned());
     };
@@ -35,6 +36,10 @@ type BoxedWindow = Box<dyn Window + Send + Sync>;
 pub struct Gui {
     pub context: egui::Context,
     pub input: egui::RawInput,
+    default_style: egui::Style,
+    pub gui_scale: f32,
+
+    pub finalized_scale: f32,
     pub start_time: Instant,
     pub prev_main_axis_size: i32,
     last_fps_update: Instant,
@@ -69,6 +74,14 @@ static IS_CONSUMING_INPUT: AtomicBool = AtomicBool::new(false);
 static mut DISABLED_GAME_UIS: once_cell::unsync::Lazy<FnvHashSet<*mut crate::il2cpp::types::Il2CppObject>> =
     once_cell::unsync::Lazy::new(|| FnvHashSet::default());
 
+fn get_scale_salt(ctx: &egui::Context) -> f32 {
+    ctx.data(|d| d.get_temp::<f32>(egui::Id::new("gui_scale_salt"))).unwrap_or(1.0)
+}
+
+fn get_scale(ctx: &egui::Context) -> f32 {
+    ctx.data(|d| d.get_temp::<f32>(egui::Id::new("gui_scale"))).unwrap_or(1.0)
+}
+
 impl Gui {
     // Call this from the render thread!
     pub fn instance_or_init(open_key_id: &str) -> &Mutex<Gui> {
@@ -87,6 +100,7 @@ impl Gui {
         let mut style = egui::Style::default();
         style.spacing.button_padding = egui::Vec2::new(8.0, 5.0);
         style.interaction.selectable_labels = false;
+
         context.set_style(style);
 
         let mut visuals = egui::Visuals::dark();
@@ -94,7 +108,10 @@ impl Gui {
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_COLOR);
         context.set_visuals(visuals);
 
-        let mut fps_value = hachimi.target_fps.load(atomic::Ordering::Relaxed);
+        let default_style = context.style().as_ref().clone();
+
+        let mut fps_value = hachimi.target_fps.load(atomic::Ordering::Relaxed
+);
         if fps_value == -1 {
             fps_value = 30;
         }
@@ -108,6 +125,9 @@ impl Gui {
         let instance = Gui {
             context,
             input: egui::RawInput::default(),
+            gui_scale: 1.0,
+            finalized_scale: 1.0,
+            default_style,
             start_time: now,
             prev_main_axis_size: 1,
             last_fps_update: now,
@@ -168,28 +188,8 @@ impl Gui {
     }
 
     pub fn set_screen_size(&mut self, width: i32, height: i32) {
-        let is_landscape = width > height;
-
-        let main_axis_size = if is_landscape {
-            height
-        } else {
-            width
-        };
-
-        let scaling_ratio = if is_landscape {
-            #[cfg(target_os = "android")]
-            {
-                PIXELS_PER_POINT_RATIO  // Android uses default (3.0/1080.0)
-            }
-            #[cfg(target_os = "windows")]
-            {
-                1.5 / 1080.0  // Windows scaling
-            }
-        } else {
-            PIXELS_PER_POINT_RATIO  // 3.0/1080.0
-        };
-
-        let pixels_per_point = main_axis_size as f32 * scaling_ratio;
+        let main_axis_size = if width < height { width } else { height };
+        let pixels_per_point = main_axis_size as f32 * PIXELS_PER_POINT_RATIO;
         self.context.set_pixels_per_point(pixels_per_point);
 
         self.input.screen_rect = Some(egui::Rect {
@@ -225,7 +225,26 @@ impl Gui {
         self.update_fps();
         let input = self.take_input();
 
-        self.context.begin_frame(input);
+        let live_scale = Hachimi::instance().config.load().gui_scale;
+        self.gui_scale = live_scale;
+
+        if !self.context.is_using_pointer() {
+            self.finalized_scale = live_scale;
+        }
+
+        self.context.data_mut(|d| {
+            d.insert_temp(egui::Id::new("gui_scale"), live_scale);
+            d.insert_temp(egui::Id::new("gui_scale_salt"), self.finalized_scale);
+        });
+
+        let mut style = self.default_style.clone();
+        if live_scale != 1.0 {
+            use egui_scale::EguiScale;
+            style.scale(live_scale);
+        }
+        self.context.set_style(style);
+
+        self.context.begin_pass(input);
         
         if self.menu_visible { self.run_menu(); }
         if self.update_progress_visible { self.run_update_progress(); }
@@ -238,22 +257,25 @@ impl Gui {
         // Store this as an atomic value so the input thread can check it without locking the gui
         IS_CONSUMING_INPUT.store(self.is_consuming_input(), atomic::Ordering::Relaxed);
 
-        self.context.end_frame()
+        self.context.end_pass()
     }
 
     const ICON_IMAGE: egui::ImageSource<'static> = egui::include_image!("../../assets/icon.png");
-    fn icon<'a>() -> egui::Image<'a> {
+    fn icon<'a>(ctx: &egui::Context) -> egui::Image<'a> {
+        let scale = get_scale(ctx);
         egui::Image::new(Self::ICON_IMAGE)
-        .fit_to_exact_size(egui::Vec2::new(24.0, 24.0))
+            .fit_to_exact_size(egui::Vec2::new(24.0 * scale, 24.0 * scale))
     }
 
-    fn icon_2x<'a>() -> egui::Image<'a> {
+    fn icon_2x<'a>(ctx: &egui::Context) -> egui::Image<'a> {
+        let scale = get_scale(ctx);
         egui::Image::new(Self::ICON_IMAGE)
-        .fit_to_exact_size(egui::Vec2::new(48.0, 48.0))
+            .fit_to_exact_size(egui::Vec2::new(48.0 * scale, 48.0 * scale))
     }
 
     fn run_splash(&mut self) {
         let ctx = &self.context;
+        let scale = get_scale(ctx);
 
         let id = egui::Id::from("splash");
         let Some(tween_val) = self.splash_tween.run(ctx, id.with("tween")) else {
@@ -263,16 +285,16 @@ impl Gui {
 
         egui::Area::new(id)
         .fixed_pos(egui::Pos2 {
-            x: -250.0 * (1.0 - tween_val),
-            y: 16.0
+            x: (-250.0 * scale) * (1.0 - tween_val),
+            y: 16.0 * scale
         })
         .show(ctx, |ui| {
-            egui::Frame::none()
+            egui::Frame::NONE
             .fill(BACKGROUND_COLOR)
-            .inner_margin(egui::Margin::same(10.0))
+            .inner_margin(egui::Margin::same((10.0 * scale) as i8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(Self::icon());
+                    ui.add(Self::icon(ctx));
                     ui.heading("Hachimi");
                     ui.label(env!("HACHIMI_DISPLAY_VERSION"));
                 });
@@ -283,6 +305,9 @@ impl Gui {
 
     fn run_menu(&mut self) {
         let ctx = &self.context;
+        let scale = get_scale(ctx);
+        let salt = self.finalized_scale;
+
         let hachimi = Hachimi::instance();
         let localized_data = hachimi.localized_data.load();
         let localize_dict_count = localized_data.localize_dict.len().to_string();
@@ -290,10 +315,13 @@ impl Gui {
 
         let mut show_notification: Option<Cow<'_, str>> = None;
         let mut show_window: Option<BoxedWindow> = None;
-        egui::SidePanel::left("hachimi_menu").show_animated(ctx, self.show_menu, |ui| {
+        egui::SidePanel::left(egui::Id::new("hachimi_menu").with(salt.to_bits()))
+            .min_width(96.0 * scale)
+            .default_width(200.0 * scale)
+            .show_animated(ctx, self.show_menu, |ui| {
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(Self::icon());
+                    ui.add(Self::icon(ctx));
                     ui.heading(t!("hachimi"));
                     if ui.button(" \u{f29c} ").clicked() {
                         show_window = Some(Box::new(AboutWindow::new()));
@@ -410,7 +438,9 @@ impl Gui {
                     ui.separator();
 
                     ui.heading(t!("menu.danger_zone_heading"));
-                    ui.label(t!("menu.danger_zone_warning"));
+                    ui.vertical(|ui| {
+                        ui.label(t!("menu.danger_zone_warning"));
+                    });
                     if ui.button(t!("menu.soft_restart")).clicked() {
                         show_window = Some(Box::new(SimpleYesNoDialog::new(&t!("confirm_dialog_title"), &t!("soft_restart_confirm_content"), |ok| {
                             if !ok { return; }
@@ -537,6 +567,8 @@ impl Gui {
 
     fn run_update_progress(&mut self) {
         let ctx = &self.context;
+        let scale = get_scale(ctx);
+
         let progress = Hachimi::instance().tl_updater.progress().unwrap_or_else(|| {
             // Assume that update is complete
             self.update_progress_visible = false;
@@ -546,28 +578,28 @@ impl Gui {
 
         egui::Area::new("update_progress".into())
         .fixed_pos(egui::Pos2 {
-            x: 4.0,
-            y: 4.0
+            x: 4.0 * scale,
+            y: 4.0 * scale
         })
         .show(ctx, |ui| {
-            egui::Frame::none()
+            egui::Frame::NONE
             .fill(BACKGROUND_COLOR)
-            .inner_margin(egui::Margin::same(4.0))
-            .rounding(4.0)
+            .inner_margin(egui::Margin::same((4.0 * scale) as i8))
+            .corner_radius(4.0 * scale)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(t!("tl_updater.title"));
-                    ui.add_space(26.0);
+                    ui.add_space(26.0 * scale);
                     ui.label(format!("{:.2}%", ratio * 100.0));
                 });
                 ui.add(
                     egui::ProgressBar::new(ratio)
-                    .desired_height(4.0)
-                    .desired_width(140.0)
+                    .desired_height(4.0 * scale)
+                    .desired_width(140.0 * scale)
                 );
                 ui.label(
                     egui::RichText::new(t!("tl_updater.warning"))
-                    .font(egui::FontId::proportional(10.0))
+                    .font(egui::FontId::proportional(10.0 * scale))
                 );
             });
         });
@@ -696,6 +728,8 @@ impl Notification {
 
     const WIDTH: f32 = 150.0;
     fn run(&mut self, ctx: &egui::Context, offset: &mut f32) -> bool {
+        let scale = get_scale(ctx);
+
         let Some(tween_val) = self.tween.run(ctx, self.id.with("tween")) else {
             return false;
         };
@@ -704,21 +738,21 @@ impl Notification {
         .anchor(
             egui::Align2::RIGHT_BOTTOM,
             egui::Vec2::new(
-                Self::WIDTH * (1.0 - tween_val),
+                (Self::WIDTH * scale) * (1.0 - tween_val),
                 *offset
             )
         )
         .show(ctx, |ui| {
-            egui::Frame::none()
+            egui::Frame::NONE
             .fill(BACKGROUND_COLOR)
-            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
-                ui.set_width(Self::WIDTH);
+                ui.set_width(Self::WIDTH * scale);
                 ui.label(&self.content);
             }).response.rect
         }).inner;
 
-        *offset -= 2.0 + frame_rect.height() * tween_val;
+        *offset -= (2.0 * scale) + frame_rect.height() * tween_val;
         true
     }
 }
@@ -728,21 +762,30 @@ pub trait Window {
 }
 
 // Shared window creation function
-fn new_window<'a>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> egui::Window<'a> {
+fn new_window<'a>(ctx: &egui::Context, id: egui::Id, title: impl Into<egui::WidgetText>) -> egui::Window<'a> {
+    let scale = get_scale(ctx);
+    let salt = get_scale_salt(ctx);
+
     egui::Window::new(title)
+    .id(id.with(salt.to_bits()))
     .pivot(egui::Align2::CENTER_CENTER)
-    .fixed_pos(ctx.screen_rect().max / 2.0)
-    .max_width(320.0)
-    .max_height(250.0)
+    .fixed_pos(ctx.viewport_rect().max / 2.0)
+    .min_width(96.0 * scale)
+    .max_width(320.0 * scale)
+    .max_height(250.0 * scale)
     .collapsible(false)
     .resizable(false)
 }
 
 fn simple_window_layout(ui: &mut egui::Ui, id: egui::Id, add_contents: impl FnOnce(&mut egui::Ui), add_buttons: impl FnOnce(&mut egui::Ui)) {
-    add_contents(ui);
-    egui::TopBottomPanel::bottom(id.with("bottom_panel"))
-    .show_inside(ui, |ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), add_buttons)
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center).with_cross_justify(true), |ui| {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            add_contents(ui);
+        });
+
+        ui.separator(); 
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), add_buttons);
     });
 }
 
@@ -761,36 +804,40 @@ fn centered_and_wrapped_text(ui: &mut egui::Ui, text: &str) {
     );
     job.halign = egui::Align::Center;
 
-    let galley = ui.fonts(|f| f.layout_job(job));
+    let galley = ui.painter().layout_job(job);
 
-    let mut text_rect = egui::Rect::NOTHING;
-    for row in &galley.rows {
-        text_rect = text_rect.union(row.visuals.mesh.calc_bounds());
-    }
+    let text_rect = galley.rect;
     let text_size = text_rect.size();
 
-    let center_pos = egui::pos2(
-        rect.left() + (rect.width() - text_size.x) / 2.0,
-        rect.top() + (rect.height() - text_size.y) / 2.0
-    );
+    let center_pos = rect.min + (rect.size() - text_size) / 2.0;
 
     let paint_pos = center_pos - text_rect.min.to_vec2();
-
     ui.painter().galley(paint_pos, galley, text_color);
 }
 
-fn paginated_window_layout(ui: &mut egui::Ui, id: egui::Id, i: &mut usize, page_count: usize, add_page_content: impl FnOnce(&mut egui::Ui, usize) -> bool) -> bool {
-    let allow_next = add_page_content(ui, *i);
-    egui::TopBottomPanel::bottom(id.with("bottom_panel"))
-    .show_inside(ui, |ui| {
+fn paginated_window_layout(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    i: &mut usize,
+    page_count: usize,
+    allow_next: bool,
+    add_page_content: impl FnOnce(&mut egui::Ui, usize)
+) -> bool {
+    let mut open = true;
+
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center).with_cross_justify(true), |ui| {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            add_page_content(ui, *i);
+        });
+
+        ui.separator();
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            let mut open = true;
             if *i < page_count - 1 {
                 if allow_next && ui.button(t!("next")).clicked() {
                     *i += 1;
                 }
-            }
-            else {
+            } else {
                 if ui.button(t!("done")).clicked() {
                     open = false;
                 }
@@ -798,10 +845,10 @@ fn paginated_window_layout(ui: &mut egui::Ui, id: egui::Id, i: &mut usize, page_
             if *i > 0 && ui.button(t!("previous")).clicked() {
                 *i -= 1;
             }
+        });
+    });
 
-            open
-        }).inner
-    }).inner
+    open
 }
 
 fn async_request_ui_content<T: Send + Sync + 'static>(ui: &mut egui::Ui, request: Arc<AsyncRequest<T>>, add_contents: impl FnOnce(&mut egui::Ui, &T)) {
@@ -818,11 +865,43 @@ fn async_request_ui_content<T: Send + Sync + 'static>(ui: &mut egui::Ui, request
     match result {
         Ok(v) => add_contents(ui, v),
         Err(e) => {
-            ui.centered_and_justified(|ui| {
-                ui.label(e.to_string());
-                if ui.button(t!("retry")).clicked() {
-                    request.call();
-                }
+            let rect = ui.available_rect_before_wrap();
+
+            let text_style = egui::TextStyle::Body;
+            let text_font = ui.style().text_styles.get(&text_style).cloned().unwrap_or_default();
+            let text_color = ui.visuals().text_color();
+
+            let mut text_job = egui::text::LayoutJob::simple(e.to_string(), text_font, text_color, rect.width());
+            text_job.halign = egui::Align::Center;
+            let text_galley = ui.painter().layout_job(text_job.clone());
+            let text_height = text_galley.size().y;
+
+            let btn_text = t!("retry");
+            let btn_style = egui::TextStyle::Button;
+            let btn_font = ui.style().text_styles.get(&btn_style).cloned().unwrap_or_default();
+            let btn_job = egui::text::LayoutJob::simple(btn_text.to_string(), btn_font, text_color, f32::INFINITY);
+            let btn_galley = ui.painter().layout_job(btn_job);
+            let btn_padding = ui.style().spacing.button_padding;
+            let btn_height = btn_galley.size().y + btn_padding.y * 2.0;
+
+            let spacing = ui.spacing().item_spacing.y;
+            let total_height = text_height + spacing + btn_height;
+
+            let center_y = rect.center().y;
+            let top_y = (center_y - total_height / 2.0).max(rect.top());
+
+            let content_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left(), top_y),
+                egui::vec2(rect.width(), total_height)
+            );
+
+            ui.allocate_ui_at_rect(content_rect, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(text_job);
+                    if ui.button(btn_text).clicked() {
+                        request.call();
+                    }
+                });
             });
         }
     }
@@ -852,8 +931,7 @@ impl Window for SimpleYesNoDialog {
         let mut open2 = true;
         let mut result = false;
 
-        new_window(ctx, &self.title)
-        .id(self.id)
+        new_window(ctx, self.id, &self.title)
         .open(&mut open)
         .show(ctx, |ui| {
             egui::TopBottomPanel::bottom(self.id.with("bottom_panel"))
@@ -870,7 +948,7 @@ impl Window for SimpleYesNoDialog {
             });
 
             egui::CentralPanel::default()
-                .frame(egui::Frame::none())
+                .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| {
                 centered_and_wrapped_text(ui, &self.content);
             });
@@ -909,8 +987,7 @@ impl Window for SimpleOkDialog {
         let mut open = true;
         let mut open2 = true;
 
-        new_window(ctx, &self.title)
-        .id(self.id)
+        new_window(ctx, self.id, &self.title)
         .open(&mut open)
         .show(ctx, |ui| {
             egui::TopBottomPanel::bottom(self.id.with("bottom_panel"))
@@ -923,7 +1000,7 @@ impl Window for SimpleOkDialog {
             });
 
             egui::CentralPanel::default()
-                .frame(egui::Frame::none())
+                .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| {
                 centered_and_wrapped_text(ui, &self.content);
             });
@@ -998,6 +1075,8 @@ impl ConfigEditor {
     }
 
     fn run_options_grid(config: &mut hachimi::Config, ui: &mut egui::Ui, tab: ConfigEditorTab) {
+        let scale = get_scale(ui.ctx());
+
         match tab {
             ConfigEditorTab::General => {
                 ui.label(t!("config_editor.language"));
@@ -1021,6 +1100,10 @@ impl ConfigEditor {
                         });
                     }
                 }
+                ui.end_row();
+
+                ui.label(t!("config_editor.gui_scale"));
+                ui.add(egui::Slider::new(&mut config.gui_scale, 0.25..=2.0).step_by(0.05));
                 ui.end_row();
 
                 #[cfg(target_os = "windows")]
@@ -1118,6 +1201,29 @@ impl ConfigEditor {
 
                 ui.label(t!("config_editor.ui_animation_scale"));
                 ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
+                ui.end_row();
+
+                ui.label(t!("config_editor.render_scale"));
+                ui.add(egui::Slider::new(&mut config.render_scale, 0.1..=10.0).step_by(0.1));
+                ui.end_row();
+
+                ui.label(t!("config_editor.msaa"));
+                Gui::run_combo(ui, "msaa", &mut config.msaa, &[
+                    (MsaaQuality:: Disabled, &t!("default")),
+                    (MsaaQuality::_2x, "2x"),
+                    (MsaaQuality::_4x, "4x"),
+                    (MsaaQuality::_8x, "8x")
+                ]);
+                ui.end_row();
+
+                ui.label(t!("config_editor.aniso_level"));
+                Gui::run_combo(ui, "aniso_level", &mut config.aniso_level, &[
+                    (AnisoLevel::Default, &t!("default")),
+                    (AnisoLevel::_2x, "2x"),
+                    (AnisoLevel::_4x, "4x"),
+                    (AnisoLevel::_8x, "8x"),
+                    (AnisoLevel::_16x, "16x")
+                ]);
                 ui.end_row();
 
                 ui.label(t!("config_editor.graphics_quality"));
@@ -1226,14 +1332,16 @@ impl ConfigEditor {
         }
 
         // Column widths workaround
-        ui.horizontal(|ui| ui.add_space(100.0));
-        ui.horizontal(|ui| ui.add_space(150.0));
+        ui.horizontal(|ui| ui.add_space(100.0 * scale));
+        ui.horizontal(|ui| ui.add_space(150.0 * scale));
         ui.end_row();
     }
 }
 
 impl Window for ConfigEditor {
     fn run(&mut self, ctx: &egui::Context) -> bool {
+        let scale = get_scale(ctx);
+
         let mut open = true;
         let mut open2 = true;
         let mut config = self.config.clone();
@@ -1243,23 +1351,22 @@ impl Window for ConfigEditor {
         }
         let mut reset_clicked = false;
 
-        new_window(ctx, t!("config_editor.title"))
-        .id(self.id)
+        new_window(ctx, self.id, t!("config_editor.title"))
         .open(&mut open)
         .show(ctx, |ui| {
             simple_window_layout(ui, self.id,
                 |ui| {
                     egui::ScrollArea::horizontal()
-                    .id_source("tabs_scroll")
+                    .id_salt("tabs_scroll")
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let style = ui.style_mut();
                             style.spacing.button_padding = egui::vec2(8.0, 5.0);
                             style.spacing.item_spacing = egui::Vec2::ZERO;
                             let widgets = &mut style.visuals.widgets;
-                            widgets.inactive.rounding = egui::Rounding::ZERO;
-                            widgets.hovered.rounding = egui::Rounding::ZERO;
-                            widgets.active.rounding = egui::Rounding::ZERO;
+                            widgets.inactive.corner_radius = egui::CornerRadius::ZERO;
+                            widgets.hovered.corner_radius = egui::CornerRadius::ZERO;
+                            widgets.active.corner_radius = egui::CornerRadius::ZERO;
 
                             for (tab, label) in ConfigEditorTab::display_list() {
                                 if ui.selectable_label(self.current_tab == tab, label.as_ref()).clicked() {
@@ -1272,15 +1379,15 @@ impl Window for ConfigEditor {
                     ui.add_space(4.0);
 
                     egui::ScrollArea::vertical()
-                    .id_source("body_scroll")
+                    .id_salt("body_scroll")
                     .show(ui, |ui| {
-                        egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(8.0, 0.0))
+                        egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(8, 0))
                         .show(ui, |ui| {
                             egui::Grid::new(self.id.with("options_grid"))
                             .striped(true)
                             .num_columns(2)
-                            .spacing([40.0, 4.0])
+                            .spacing([40.0 * scale, 4.0 * scale])
                             .show(ui, |ui| {
                                 Self::run_options_grid(&mut config, ui, self.current_tab);
                             });
@@ -1363,11 +1470,17 @@ impl Window for FirstTimeSetupWindow {
         let mut open = true;
         let mut page_open = true;
 
-        new_window(ctx, t!("first_time_setup.title"))
-        .id(self.id)
+        new_window(ctx, self.id, t!("first_time_setup.title"))
         .open(&mut open)
         .show(ctx, |ui| {
-            page_open = paginated_window_layout(ui, self.id, &mut self.current_page, 3, |ui, i| {
+            let allow_next = match self.current_page {
+                1 => {
+                    (**self.index_request.result.load()).as_ref().map_or(false, |r| r.is_ok())
+                },
+                _ => true
+            };
+
+            page_open = paginated_window_layout(ui, self.id, &mut self.current_page, 3, allow_next, |ui, i| {
                 match i {
                     0 => {
                         ui.heading(t!("first_time_setup.welcome_heading"));
@@ -1383,10 +1496,9 @@ impl Window for FirstTimeSetupWindow {
                                 let mut config = config.clone();
                                 config.language = language;
                                 save_and_reload_config(config);
-                            }   
+                            }
                         });
                         ui.label(t!("first_time_setup.welcome_content"));
-                        true
                     }
                     1 => {
                         ui.heading(t!("first_time_setup.translation_repo_heading"));
@@ -1394,15 +1506,13 @@ impl Window for FirstTimeSetupWindow {
                         ui.label(t!("first_time_setup.select_translation_repo"));
                         ui.add_space(4.0);
 
-                        let mut is_index_loaded = false;
                         async_request_ui_content(ui, self.index_request.clone(), |ui, repo_list| {
-                            is_index_loaded = true;
                             let filtered_repos: Vec<_> = repo_list.iter()
                                 .filter(|repo| repo.region == Hachimi::instance().game.region)
                                 .collect();
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                                egui::Frame::none()
-                                .inner_margin(egui::Margin::symmetric(8.0, 0.0))
+                                egui::Frame::NONE
+                                .inner_margin(egui::Margin::symmetric(8, 0))
                                 .show(ui, |ui| {
                                     if filtered_repos.is_empty() {
                                         ui.label(t!("first_time_setup.no_compatible_repo"));
@@ -1418,15 +1528,13 @@ impl Window for FirstTimeSetupWindow {
                                 });
                             });
                         });
-                        is_index_loaded
                     }
                     2 => {
                         ui.heading(t!("first_time_setup.complete_heading"));
                         ui.separator();
                         ui.label(t!("first_time_setup.complete_content"));
-                        true
                     }
-                    _ => false
+                    _ => {}
                 }
             });
         });
@@ -1468,12 +1576,11 @@ impl Window for AboutWindow {
     fn run(&mut self, ctx: &egui::Context) -> bool {
         let mut open = true;
 
-        new_window(ctx, t!("about.title"))
-        .id(self.id)
+        new_window(ctx, self.id, t!("about.title"))
         .open(&mut open)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.add(Gui::icon_2x());
+                ui.add(Gui::icon_2x(ctx));
                 ui.vertical(|ui| {
                     ui.heading(t!("hachimi"));
                     ui.label(env!("HACHIMI_DISPLAY_VERSION"));
@@ -1515,8 +1622,7 @@ impl Window for LicenseWindow {
     fn run(&mut self, ctx: &egui::Context) -> bool {
         let mut open = true;
 
-        new_window(ctx, t!("license.title"))
-        .id(self.id)
+        new_window(ctx, self.id, t!("license.title"))
         .open(&mut open)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1548,8 +1654,7 @@ impl PersistentMessageWindow {
 
 impl Window for PersistentMessageWindow {
     fn run(&mut self, ctx: &egui::Context) -> bool {
-        new_window(ctx, &self.title)
-        .id(self.id)
+        new_window(ctx, self.id, &self.title)
         .show(ctx, |ui| {
             simple_window_layout(ui, self.id,
                 |ui| {
