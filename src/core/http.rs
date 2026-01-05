@@ -86,13 +86,21 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
     let content_length = res.header("Content-Length").and_then(|s| s.parse::<u64>().ok());
     let accepts_ranges = res.header("Accept-Ranges").map_or(false, |v| v == "bytes");
 
-    if let (Some(length), true) = (content_length, accepts_ranges) {
+    let mut actual_length = 0u64;
+    let use_parallel = if let Some(length) = content_length {
+        actual_length = length;
+        accepts_ranges && length > min_chunk_size
+    } else {
+        false
+    };
+
+    if use_parallel {
         let mut downloaded_file = fs::File::create(file_path)?;
-        downloaded_file.set_len(length)?;
+        downloaded_file.set_len(actual_length)?;
         drop(downloaded_file);
 
-        let chunk_size_per_thread = (length / num_threads as u64).max(min_chunk_size);
-        let num_chunks = (length + chunk_size_per_thread - 1) / chunk_size_per_thread;
+        let chunk_size_per_thread = (actual_length / num_threads as u64).max(min_chunk_size);
+        let num_chunks = (actual_length + chunk_size_per_thread - 1) / chunk_size_per_thread;
 
         let fatal_error = Arc::new(Mutex::new(None::<Error>));
         let stop_signal = Arc::new(AtomicBool::new(false));
@@ -148,7 +156,7 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
 
         for i in 0..num_chunks {
             let start = i * chunk_size_per_thread;
-            let end = (start + chunk_size_per_thread - 1).min(length - 1);
+            let end = (start + chunk_size_per_thread - 1).min(actual_length - 1);
             if sender.send((start, end)).is_err() { break; }
         }
         drop(sender);
@@ -161,7 +169,7 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
         let downloaded_file = fs::File::options().write(true).open(file_path)?;
         downloaded_file.sync_data()?;
     } else {
-        debug!("{} does not support range requests; falling back to single-threaded download.", url);
+        debug!("Using single-threaded download for: {}", url);
         let res = agent.get(url).call()?;
         let mut file = fs::File::create(file_path)?;
         let mut buffer = vec![0u8; chunk_size];
