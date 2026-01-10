@@ -34,7 +34,7 @@ unsafe extern "C" fn pre_app_specialize(this: *mut Module, args: *mut AppSpecial
     _ = PACKAGE_NAME.set(package_name.to_string());
 
     (*this).is_game = match game_impl::get_region(&package_name) {
-        Region::Japan => true,
+        Region::Japan | Region::Taiwan | Region::Korea | Region::China | Region::Global => true,
         _ => false
     };
 }
