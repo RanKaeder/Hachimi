@@ -12,7 +12,7 @@ use crate::{
     }
 };
 
-use super::{utils, wnd_hook};
+use super::{hook, utils, wnd_hook};
 
 pub fn is_il2cpp_lib(filename: &str) -> bool {
     filename == "GameAssembly.dll"
@@ -23,6 +23,11 @@ pub fn is_criware_lib(filename: &str) -> bool {
 }
 
 pub fn on_hooking_finished(hachimi: &Hachimi) {
+    // In late loading mode, we still need wnd_hook to capture menu key for lazy GUI init
+    let is_late = hook::is_late_loading();
+    info!("on_hooking_finished: is_late_loading = {}", is_late);
+    
+    info!("Initializing wnd_hook");
     wnd_hook::init();
 
     // Kill unity crash handler (just to be safe)
