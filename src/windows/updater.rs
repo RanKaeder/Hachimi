@@ -16,7 +16,7 @@ use crate::core::{gui::{PersistentMessageWindow, SimpleYesNoDialog}, http, Error
 
 use super::{main::DLL_HMODULE, utils};
 
-const REPO_PATH: &str = "kairusds/Hachimi-Edge";
+const REPO_PATH: &str = "RanKaeder/Hachimi";
 
 #[derive(Default)]
 pub struct Updater {

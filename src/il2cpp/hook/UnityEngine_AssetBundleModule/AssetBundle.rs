@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 use fnv::FnvHashMap;
 use once_cell::sync::Lazy;
@@ -13,6 +13,29 @@ use crate::{core::{ext::Utf16StringExt, hachimi::AssetMetadata}, il2cpp::{
 }};
 
 pub const ASSET_PATH_PREFIX: &str = "assets/_gallopresources/bundle/resources/";
+
+// 全局缓存mods bundles（只在第一次访问时加载一次，线程安全）
+static mut MODS_BUNDLES_CACHE: Option<FnvHashMap<String, *mut Il2CppObject>> = None;
+static INIT_MODS_BUNDLES: Once = Once::new();
+
+fn get_mods_bundles_cache() -> &'static FnvHashMap<String, *mut Il2CppObject> {
+    unsafe {
+        INIT_MODS_BUNDLES.call_once(|| {
+            use crate::{core::Hachimi, il2cpp::ext::LocalizedDataExt};
+            let hachimi = Hachimi::instance();
+            let localized_data = hachimi.localized_data.load();
+            let mods_bundles = localized_data.load_mods_asset_bundles();
+
+            println!("Loaded {} mod asset bundles into global cache", mods_bundles.len());
+            for (name, _) in &mods_bundles {
+                println!("Loaded mod asset bundle: '{}'", name);
+            }
+
+            MODS_BUNDLES_CACHE = Some(mods_bundles);
+        });
+        MODS_BUNDLES_CACHE.as_ref().unwrap()
+    }
+}
 
 pub struct RequestInfo {
     pub name_handle: GCHandle,
@@ -46,6 +69,23 @@ pub fn check_asset_bundle_name(this: *mut Il2CppObject, metadata: &AssetMetadata
 
 type LoadAssetFn = extern "C" fn(this: *mut Il2CppObject, name: *mut Il2CppString, type_: *mut Il2CppObject) -> *mut Il2CppObject;
 extern "C" fn LoadAsset_Internal(this: *mut Il2CppObject, name: *mut Il2CppString, type_: *mut Il2CppObject) -> *mut Il2CppObject {
+    // 只用全局缓存的mods bundles，不再每次重新加载
+    let mods_bundles = get_mods_bundles_cache();
+    for (_bundle_name, mod_bundle) in mods_bundles.iter() {
+        if mod_bundle.is_null() {
+            continue;
+        }
+
+        // 尝试从mod bundle加载同名资源
+        let mod_asset = get_orig_fn!(LoadAsset_Internal, LoadAssetFn)(*mod_bundle, name, type_);
+        if !mod_asset.is_null() {
+            // 找到mod资源，使用mod版本
+            on_LoadAsset(*mod_bundle, mod_asset, name);
+            return mod_asset;
+        }
+    }
+
+    // mod中没有找到，使用原始资源
     let asset = get_orig_fn!(LoadAsset_Internal, LoadAssetFn)(this, name, type_);
     on_LoadAsset(this, asset, name);
     asset
