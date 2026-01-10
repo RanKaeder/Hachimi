@@ -1,4 +1,4 @@
-hachimi: "Hachimi Edge"
+hachimi: "Hachimi"
 
 windows:
   menu_open_key: "右方向键"
@@ -200,10 +200,10 @@ update_prompt_dialog:
     发现新的 Hachimi 更新 (%{version})，是否立即安装？
     安装完成后游戏将自动重启。
   android_content: |
-    检测到 Hachimi Edge 的新版本 (%{version})。是否更新？
+    检测到 Hachimi 的新版本 (%{version})。是否更新？
 
     点击“是”将跳转至 UmaPatcher Edge，在其中重新为当前游戏补丁以更新 Hachimi。
-    (无需重新下载完整游戏文件或 APK，重新为当前游戏版本的 APK 补丁并安装即可，UmaPatcher Edge 将自动下载最新版本的 Hachimi Edge。)
+    (无需重新下载完整游戏文件或 APK，重新为当前游戏版本的 APK 补丁并安装即可，UmaPatcher Edge 将自动下载最新版本的 Hachimi。)
 
 updating_dialog:
   title: "更新中"

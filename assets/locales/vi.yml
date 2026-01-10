@@ -1,4 +1,4 @@
-hachimi: "Hachimi Edge"
+hachimi: "Hachimi"
 
 windows:
   menu_open_key: "Mũi tên phải"
@@ -187,10 +187,10 @@ update_prompt_dialog:
     Đã có phiên bản Hachimi mới (%{version}). Bạn có muốn cài đặt không?
     Game sẽ được khởi động lại để áp dụng bản cập nhật.
   android_content: |
-    Đã có bản cập nhật Hachimi Edge mới (%{version}). Bạn có muốn cài đặt không?
+    Đã có bản cập nhật Hachimi mới (%{version}). Bạn có muốn cài đặt không?
 
     Nhấn "Có" để mở UmaPatcher Edge và patch lại game hiện tại của bạn.
-    (Không cần tải lại toàn bộ game hay APK, bạn chỉ cần patch lại như bình thường vì UmaPatcher Edge luôn tự tải về phiên bản Hachimi Edge mới nhất.)
+    (Không cần tải lại toàn bộ game hay APK, bạn chỉ cần patch lại như bình thường vì UmaPatcher Edge luôn tự tải về phiên bản Hachimi mới nhất.)
 
 updating_dialog:
   title: "Đang cập nhật"
