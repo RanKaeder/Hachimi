@@ -1,4 +1,4 @@
-hachimi: "Hachimi Edge"
+hachimi: "Hachimi"
 
 windows:
   menu_open_key: "Seta direita"
@@ -205,10 +205,10 @@ update_prompt_dialog:
     Uma nova atualização do Hachimi está disponível (%{version}). Deseja instalá-la?
     O jogo será reiniciado para aplicar a atualização.
   android_content: |
-    Uma nova atualização do Hachimi Edge está disponível (%{version}). Deseja instalá-la?
+    Uma nova atualização do Hachimi está disponível (%{version}). Deseja instalá-la?
 
     Toque em "Sim" para abrir o UmaPatcher Edge e reaplicar o patch no jogo.
-    (Não será necessário baixar os APKs do jogo novamente. Basta apenas aplicar o patch mais uma vez para que o UmaPatcher Edge instale a última versão do Hachimi Edge.)
+    (Não será necessário baixar os APKs do jogo novamente. Basta apenas aplicar o patch mais uma vez para que o UmaPatcher Edge instale a última versão do Hachimi.)
 
 updating_dialog:
   title: "Atualizando"
