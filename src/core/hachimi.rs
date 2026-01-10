@@ -9,7 +9,7 @@ use crate::{core::{plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il2cpp:
 
 use super::{game::{Game, Region}, ipc, plurals, template, template_filters, tl_repo, utils, Error, Interceptor};
 
-pub const REPO_PATH: &str = "kairusds/Hachimi-Edge";
+pub const REPO_PATH: &str = "RanKaeder/Hachimi";
 pub const GITHUB_API: &str = "https://api.github.com/repos";
 pub const CODEBERG_API: &str = "https://codeberg.org/api/v1/repos";
 pub const WEBSITE_URL: &str = "https://hachimi.noccu.art";
@@ -199,7 +199,14 @@ impl Hachimi {
                 return;
             }
         };
+        
         self.localized_data.store(Arc::new(new_data));
+        
+        // 只有在 IL2CPP 初始化完成后才尝试加载 mods AssetBundles
+        if self.hooking_finished.load(atomic::Ordering::Relaxed) {
+            use crate::il2cpp::ext::LocalizedDataExt;
+            let _mods_bundles = self.localized_data.load().load_mods_asset_bundles();
+        }
     }
 
     pub fn init_character_data(&self) {
@@ -264,6 +271,10 @@ impl Hachimi {
                 info!("Plugin init failed");
             }
         }
+
+        // 现在 IL2CPP 已经完全初始化，可以安全地扫描和加载 mods AssetBundles
+        use crate::il2cpp::ext::LocalizedDataExt;
+        let _mods_bundles = self.localized_data.load().load_mods_asset_bundles();
     }
 
     pub fn get_data_path<P: AsRef<Path>>(&self, rel_path: P) -> PathBuf {
@@ -371,6 +382,10 @@ pub struct Config {
     pub ui_animation_scale: f32,
     #[serde(default)]
     pub disabled_hooks: FnvHashSet<String>,
+    #[serde(default = "Config::default_notifier_host")]
+    pub notifier_host: String,
+    #[serde(default = "Config::default_notifier_timeout_ms")]
+    pub notifier_timeout_ms: u64,
 
     // theme settings
     #[serde(default = "Config::default_ui_accent")]
@@ -412,6 +427,8 @@ impl Config {
     pub fn default_extreme_bg() -> egui::Color32 { egui::Color32::from_rgb(15, 15, 15) }
     pub fn default_text_color() -> egui::Color32 { egui::Color32::from_gray(170) }
     pub fn default_window_rounding() -> f32 { 10.0 }
+    fn default_notifier_host() -> String { "http://127.0.0.1:4693".to_owned() }
+    fn default_notifier_timeout_ms() -> u64 { 100 }
 }
 
 impl Default for Config {
