@@ -1,12 +1,19 @@
 #![allow(non_snake_case)]
 
-use std::path::Path;
+use std::{path::Path, sync::atomic::{AtomicBool, Ordering}};
 
 use windows::{core::{w, PCWSTR}, Win32::{Foundation::HMODULE, System::LibraryLoader::GetModuleHandleW}};
 
 use crate::{core::{Error, Hachimi}, windows::{steamworks, utils}};
 
 use super::{hachimi_impl, proxy, ffi};
+
+// Global flag to track if this is a late loading scenario
+static IS_LATE_LOADING: AtomicBool = AtomicBool::new(false);
+
+pub fn is_late_loading() -> bool {
+    IS_LATE_LOADING.load(Ordering::Relaxed)
+}
 
 type LoadLibraryWFn = extern "C" fn(filename: PCWSTR) -> HMODULE;
 extern "C" fn LoadLibraryW(filename: PCWSTR) -> HMODULE {
@@ -45,16 +52,12 @@ fn init_internal() -> Result<(), Error> {
     let hachimi = Hachimi::instance();
     if let Ok(handle) = unsafe { GetModuleHandleW(w!("GameAssembly.dll")) } {
         info!("Late loading detected");
-        if steamworks::is_overlay_conflicting(&hachimi) {
-            info!("Hooking LoadLibraryW");
-            hachimi.interceptor.hook(ffi::LoadLibraryW as *const () as usize, LoadLibraryW as *const () as usize)?;
-        }
-        else {
-            info!("Skipping LoadLibraryW hook");
-        }
-
-        info!("Init cri_mana_vpx.dll proxy");
-        proxy::cri_mana_vpx::init();
+        IS_LATE_LOADING.store(true, Ordering::Relaxed);
+        
+        // When late loaded (e.g., by localify), skip all proxy and hook initialization
+        // Other DLL (like localify) may have already hooked LoadLibraryW
+        info!("Skipping LoadLibraryW hook (late loading mode)");
+        info!("Skipping DLL proxy initialization (late loading mode)");
 
         hachimi.on_dlopen("GameAssembly.dll", handle.0 as _);
         hachimi.on_hooking_finished();   
