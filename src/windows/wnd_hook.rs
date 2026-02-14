@@ -63,7 +63,10 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
                 });
                 return LRESULT(0);
             }
+            let hachimi = Hachimi::instance();
             if current_key == Hachimi::instance().config.load().windows.menu_open_key {
+                // Lazy init GUI if not already initialized (for late loading mode)
+                hachimi.try_lazy_init_gui();
                 let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
                     return unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
                 };
