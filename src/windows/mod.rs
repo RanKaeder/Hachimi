@@ -1,5 +1,5 @@
 pub mod main;
-mod hook;
+pub mod hook;
 pub mod proxy;
 pub mod utils;
 pub mod symbols_impl;
