@@ -50,7 +50,10 @@ pub struct Hachimi {
     #[cfg(target_os = "windows")]
     pub discord_rpc: AtomicBool,
 
-    pub updater: Arc<updater::Updater>
+    pub updater: Arc<updater::Updater>,
+    
+    #[cfg(target_os = "windows")]
+    pub gui_lazy_initialized: AtomicBool
 }
 
 static INSTANCE: OnceCell<Arc<Hachimi>> = OnceCell::new();
@@ -135,6 +138,9 @@ impl Hachimi {
             discord_rpc: AtomicBool::new(config.windows.discord_rpc),
 
             updater: Arc::default(),
+            
+            #[cfg(target_os = "windows")]
+            gui_lazy_initialized: AtomicBool::new(false),
 
             config: ArcSwap::new(Arc::new(config))
         })
@@ -248,20 +254,43 @@ impl Hachimi {
 
         info!("GameAssembly finished loading");
         il2cpp::symbols::init();
+        info!("IL2CPP symbols initialized");
+        
         il2cpp::hook::init();
+        info!("IL2CPP hooks initialized");
+
+        // Skip GUI init and GameSystem initialization in late loading mode
+        #[cfg(target_os = "windows")]
+        let is_late_loading = crate::windows::hook::is_late_loading();
+        #[cfg(not(target_os = "windows"))]
+        let is_late_loading = false;
+        
+        info!("Late loading check: {}", is_late_loading);
 
         // By the time it finished hooking the game will have already finished initializing
-        GameSystem::on_game_initialized();
+        // Don't call this in late loading mode as the game is already initialized
+        if !is_late_loading {
+            info!("Calling GameSystem::on_game_initialized");
+            GameSystem::on_game_initialized();
+            info!("GameSystem::on_game_initialized completed");
+        } else {
+            info!("Skipping GameSystem::on_game_initialized (late loading mode)");
+        }
 
         let config = self.config.load();
-        if !config.disable_gui {
+        
+        if !config.disable_gui && !is_late_loading {
+            info!("Initializing GUI");
             gui_impl::init();
+        } else if is_late_loading {
+            info!("Skipping GUI init (late loading mode)");
         }
 
         if config.enable_ipc {
             ipc::start_http(config.ipc_listen_all);
         }
 
+        info!("Calling hachimi_impl::on_hooking_finished");
         hachimi_impl::on_hooking_finished(self);
 
         for plugin in self.plugins.lock().unwrap().iter() {
@@ -292,6 +321,17 @@ impl Hachimi {
                 }
             });
         }
+    }
+    
+    #[cfg(target_os = "windows")]
+    pub fn try_lazy_init_gui(&self) {
+        if self.gui_lazy_initialized.swap(true, atomic::Ordering::Relaxed) {
+            // Already initialized
+            return;
+        }
+        
+        info!("Lazy initializing GUI on first menu key press");
+        gui_impl::init();
     }
 }
 
