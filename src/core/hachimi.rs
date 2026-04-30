@@ -386,6 +386,8 @@ pub struct Config {
     pub notifier_host: String,
     #[serde(default = "Config::default_notifier_timeout_ms")]
     pub notifier_timeout_ms: u64,
+    #[serde(default = "Config::default_enable_race_response_dump")]
+    pub enable_race_response_dump: bool,
 
     // theme settings
     #[serde(default = "Config::default_ui_accent")]
@@ -429,6 +431,7 @@ impl Config {
     pub fn default_window_rounding() -> f32 { 10.0 }
     fn default_notifier_host() -> String { "http://127.0.0.1:4693".to_owned() }
     fn default_notifier_timeout_ms() -> u64 { 100 }
+    fn default_enable_race_response_dump() -> bool { false }
 }
 
 impl Default for Config {
