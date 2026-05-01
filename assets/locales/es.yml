@@ -170,6 +170,9 @@ config_editor:
   physics_update_mode: "Modo de actualización de físicas"
   disable_skill_name_translation: "No traducir habilidades"
   hide_ingame_ui_hotkey: "Atajo para ocultar UI del juego"
+  notifier_host: "Host del notifier (sin / al final)"
+  notifier_timeout_in_ms_restart: "Tiempo de espera del notifier en ms\nRequiere reinicio completo"
+  save_race_response_msgpack: "Guardar datos de carrera"
   export_circle_fan_counts: "Exportar recuento de fans del círculo"
   hide_ingame_ui_hotkey_info: >-
     Esta opción te permite asignar una tecla para alternar el UI del juego.

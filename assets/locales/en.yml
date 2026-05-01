@@ -176,6 +176,9 @@ config_editor:
   physics_update_mode: "Physics update mode"
   disable_skill_name_translation: "Disable skill name translation"
   hide_ingame_ui_hotkey: "Hide ingame UI hotkey"
+  notifier_host: "Notifier host (not ends with /)"
+  notifier_timeout_in_ms_restart: "Notifier timeout in ms\nRequire a hard restart"
+  save_race_response_msgpack: "Save race data"
   export_circle_fan_counts: "Export circle fan counts"
   hide_ingame_ui_hotkey_info: >-
     This option allows a shortcut key to toggle the ingame UI.

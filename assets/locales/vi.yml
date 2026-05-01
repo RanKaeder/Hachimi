@@ -153,6 +153,9 @@ config_editor:
   live_theater_allow_same_chara: "Cho phép cùng nhân vật trong live"
   physics_update_mode: "Chế độ vật lý"
   hide_ingame_ui_hotkey: "Phím tắt ẩn giao diện trong game"
+  notifier_host: "Host notifier (không kết thúc bằng /)"
+  notifier_timeout_in_ms_restart: "Thời gian chờ notifier (ms)\nCần khởi động lại hoàn toàn"
+  save_race_response_msgpack: "Lưu dữ liệu đua"
   export_circle_fan_counts: "Xuất số fan của circle"
   hide_ingame_ui_hotkey_info: >-
     Tùy chọn này cho phép sử dụng phím tắt để ẩn/hiện giao diện (UI) trong trò chơi.

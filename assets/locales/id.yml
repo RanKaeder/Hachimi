@@ -166,6 +166,9 @@ config_editor:
   physics_update_mode: "Mode update fisik"
   disable_skill_name_translation: "Matikan translasi nama skill"
   hide_ingame_ui_hotkey: "Sembunyikan hotkey UI dalam game"
+  notifier_host: "Host notifier (tanpa / di akhir)"
+  notifier_timeout_in_ms_restart: "Waktu timeout notifier dalam ms\nPerlu restart penuh"
+  save_race_response_msgpack: "Simpan data race"
   export_circle_fan_counts: "Ekspor jumlah fan circle"
   hide_ingame_ui_hotkey_info: >-
     Opsi ini memungkinkan tombol pintas untuk mengaktifkan/menonaktifkan UI di dalam game.

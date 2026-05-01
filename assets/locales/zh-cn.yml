@@ -166,6 +166,9 @@ config_editor:
   physics_update_mode: "物理引擎更新模式"
   disable_skill_name_translation: "禁用技能名称翻译"
   hide_ingame_ui_hotkey: "隐藏游戏内 UI 的快捷键"
+  notifier_host: "Notifier 主机地址（末尾不带 /）"
+  notifier_timeout_in_ms_restart: "Notifier 超时（毫秒）\n需要完全重启"
+  save_race_response_msgpack: "保存比赛数据"
   export_circle_fan_counts: "导出社团粉丝数"
   hide_ingame_ui_hotkey_info: >-
     此选项允许使用快捷键切换游戏内 UI 界面的显示。

@@ -2143,15 +2143,15 @@ impl ConfigEditor {
                 }
                 ui.end_row();
 
-                ui.label("Notifier host (not ends with /)");
+                ui.label(t!("config_editor.notifier_host"));
                 ui.text_edit_singleline(&mut config.notifier_host);
                 ui.end_row();
 
-                ui.label("Notifier timeout in ms\nRequire a hard restart");
+                ui.label(t!("config_editor.notifier_timeout_in_ms_restart"));
                 ui.add(egui::Slider::new(&mut config.notifier_timeout_ms, 10..=500).step_by(10.0));
                 ui.end_row();
 
-                ui.label("Save race response msgpack");
+                ui.label(t!("config_editor.save_race_response_msgpack"));
                 ui.checkbox(&mut config.enable_race_response_dump, "");
                 ui.end_row();
 
