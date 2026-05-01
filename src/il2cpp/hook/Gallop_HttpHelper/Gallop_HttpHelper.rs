@@ -23,8 +23,7 @@ static AGENT: Lazy<ureq::Agent> = Lazy::new(|| {
 static REQUEST: Lazy<String> = Lazy::new(|| Hachimi::instance().config.load().notifier_host.clone() + "/notify/request");
 static RESPONSE: Lazy<String> = Lazy::new(|| Hachimi::instance().config.load().notifier_host.clone() + "/notify/response");
 static LAST_POST_URL: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
-
-const RACE_RESULT_KEY: &[u8] = b"race_result_info";
+const RACE_URL_KEYWORDS: [&str; 3] = ["race_start", "race_replay", "get_saved_race_result"];
 
 type CompressRequestFn = extern "C" fn(data: *mut Il2CppArray) -> *mut Il2CppArray;
 type DecompressResponseFn = extern "C" fn(data: *mut Il2CppArray) -> *mut Il2CppArray;
@@ -56,7 +55,7 @@ fn save_response_msgpack(data: &[u8]) {
         return;
     }
 
-    if !is_race_result_response_fast(data) {
+    if !is_target_race_response_url() {
         return;
     }
 
@@ -68,10 +67,11 @@ fn save_response_msgpack(data: &[u8]) {
     }
 
     let now = Local::now();
+    let url_suffix = current_url_suffix();
     let out_path = out_dir.join(format!(
-        "{}_{:03}R.msgpack",
-        now.format("%Y%m%d_%H%M%S"),
-        now.timestamp_subsec_millis()
+        "{} {}.msgpack",
+        now.format("%Y-%m-%d %H-%M-%S-%3f"),
+        sanitize_filename_component(&url_suffix)
     ));
 
     if let Err(e) = fs::write(&out_path, data) {
@@ -79,22 +79,45 @@ fn save_response_msgpack(data: &[u8]) {
     }
 }
 
-fn is_race_result_response_fast(data: &[u8]) -> bool {
-    let is_race_url = LAST_POST_URL
+fn is_target_race_response_url() -> bool {
+    LAST_POST_URL
         .read()
-        .map(|url| url.contains("race"))
-        .unwrap_or(false);
+        .map(|url| RACE_URL_KEYWORDS.iter().any(|keyword| url.contains(keyword)))
+        .unwrap_or(false)
+}
 
-    if !is_race_url {
-        return false;
+fn current_url_suffix() -> String {
+    LAST_POST_URL
+        .read()
+        .ok()
+        .and_then(|url| {
+            let trimmed = url.trim_end_matches('/');
+            if trimmed.is_empty() {
+                None
+            } else {
+                trimmed.rsplit('/').next().map(|s| s.to_string())
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn sanitize_filename_component(input: &str) -> String {
+    const ILLEGAL: &str = "\\/:*?\"<>|";
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        if c.is_control() || ILLEGAL.contains(c) {
+            out.push('-');
+        } else {
+            out.push(c);
+        }
     }
 
-    if data.len() < RACE_RESULT_KEY.len() {
-        return false;
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
     }
-
-    data.windows(RACE_RESULT_KEY.len())
-        .any(|w| w == RACE_RESULT_KEY)
 }
 
 extern "C" fn CompressRequest(data: *mut Il2CppArray) -> *mut Il2CppArray {
