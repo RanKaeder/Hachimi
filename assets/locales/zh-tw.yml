@@ -157,6 +157,7 @@ config_editor:
   physics_update_mode: "物理運算模式"
   disable_skill_name_translation: "停用技能名稱翻譯"
   hide_ingame_ui_hotkey: "隱藏遊戲內 UI 快捷鍵"
+  export_circle_fan_counts: "匯出社團粉絲數"
   hide_ingame_ui_hotkey_info: >-
     此選項允許使用快捷鍵切換遊戲內介面（UI）的顯示。
     Android 端，您需要雙擊「音量上鍵」，或連續三次點擊螢幕右上角。

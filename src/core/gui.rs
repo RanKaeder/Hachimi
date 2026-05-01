@@ -2154,6 +2154,10 @@ impl ConfigEditor {
                 ui.label("Save race response msgpack");
                 ui.checkbox(&mut config.enable_race_response_dump, "");
                 ui.end_row();
+
+                ui.label(t!("config_editor.export_circle_fan_counts"));
+                ui.checkbox(&mut config.export_circle_fan_counts, "");
+                ui.end_row();
             }
         }
 

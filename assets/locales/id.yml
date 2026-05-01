@@ -166,6 +166,7 @@ config_editor:
   physics_update_mode: "Mode update fisik"
   disable_skill_name_translation: "Matikan translasi nama skill"
   hide_ingame_ui_hotkey: "Sembunyikan hotkey UI dalam game"
+  export_circle_fan_counts: "Ekspor jumlah fan circle"
   hide_ingame_ui_hotkey_info: >-
     Opsi ini memungkinkan tombol pintas untuk mengaktifkan/menonaktifkan UI di dalam game.
     Untuk Android, Anda perlu mengetuk dua kali tombol Volume Atas, atau mengetuk tiga kali di bagian kanan atas layar.

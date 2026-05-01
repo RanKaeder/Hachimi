@@ -388,6 +388,8 @@ pub struct Config {
     pub notifier_timeout_ms: u64,
     #[serde(default = "Config::default_enable_race_response_dump")]
     pub enable_race_response_dump: bool,
+    #[serde(default = "Config::default_export_circle_fan_counts")]
+    pub export_circle_fan_counts: bool,
 
     // theme settings
     #[serde(default = "Config::default_ui_accent")]
@@ -432,6 +434,7 @@ impl Config {
     fn default_notifier_host() -> String { "http://127.0.0.1:4693".to_owned() }
     fn default_notifier_timeout_ms() -> u64 { 100 }
     fn default_enable_race_response_dump() -> bool { false }
+    fn default_export_circle_fan_counts() -> bool { false }
 }
 
 impl Default for Config {

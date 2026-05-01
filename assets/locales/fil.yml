@@ -147,6 +147,7 @@ config_editor:
   physics_update_mode: "Mode ng pag-update ng physics"
   disable_skill_name_translation: "I-disable ang pag-translate ng mga skill name"
   hide_ingame_ui_hotkey: "I-enable ang hotkey ng pagtago ng game UI"
+  export_circle_fan_counts: "I-export ang bilang ng fan ng circle"
   hide_ingame_ui_hotkey_info: >-
     Pinapayagan ng opsyong ito ang isang shortcut key sa pag-toggle ng game UI.
     Para sa Android, kailangan mong i-double tap ang Volume Up key, o i-triple tap ang top-right ng screen.

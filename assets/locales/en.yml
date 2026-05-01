@@ -176,6 +176,7 @@ config_editor:
   physics_update_mode: "Physics update mode"
   disable_skill_name_translation: "Disable skill name translation"
   hide_ingame_ui_hotkey: "Hide ingame UI hotkey"
+  export_circle_fan_counts: "Export circle fan counts"
   hide_ingame_ui_hotkey_info: >-
     This option allows a shortcut key to toggle the ingame UI.
     For Android, you need to double tap the Volume Up key, or triple tap the top right of the screen.

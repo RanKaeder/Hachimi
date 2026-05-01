@@ -170,6 +170,7 @@ config_editor:
   physics_update_mode: "Modo de actualización de físicas"
   disable_skill_name_translation: "No traducir habilidades"
   hide_ingame_ui_hotkey: "Atajo para ocultar UI del juego"
+  export_circle_fan_counts: "Exportar recuento de fans del círculo"
   hide_ingame_ui_hotkey_info: >-
     Esta opción te permite asignar una tecla para alternar el UI del juego.
     En Android, tendrás que pulsar dos veces el botón de Volumen +, ó tocando tres veces la parte superior derecha de la pantalla.
