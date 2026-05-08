@@ -80,6 +80,7 @@ pub mod Unity_TextMeshPro;
 #[cfg(target_os = "windows")]
 pub mod UnityEngine_InputLegacyModule;
 
+pub mod Gallop_HttpHelper;
 pub mod LibNative_Runtime;
 pub mod umamusume;
 pub mod Cute_UI_Assembly;
@@ -112,6 +113,7 @@ pub fn init() {
 
     // Umamusume
     LibNative_Runtime::init();
+    Gallop_HttpHelper::init();
     umamusume::init();
     Cute_UI_Assembly::init();
     Plugins::init();
