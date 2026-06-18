@@ -1,4 +1,4 @@
-hachimi: "Hachimi Edge"
+hachimi: "Hachimi"
 
 windows:
   menu_open_key: "Right arrow"
@@ -198,6 +198,10 @@ config_editor:
   cyspring_mono_uncap_frame_scale: "CySpring Mono Frame Scale Uncap"
   disable_skill_name_translation: "Disable skill name translation"
   hide_ingame_ui_hotkey: "Hide ingame UI hotkey"
+  notifier_host: "Notifier host (not ends with /)"
+  notifier_timeout_in_ms_restart: "Notifier timeout in ms\nRequire a hard restart"
+  save_race_response_msgpack: "Save race data"
+  export_circle_fan_counts: "Export circle fan counts"
   hide_ingame_ui_hotkey_info: >-
     This option allows a shortcut key to toggle the ingame UI.
     For Android, you can triple tap the top right of the screen.
@@ -292,10 +296,10 @@ update_prompt_dialog:
     A new Hachimi update is available (%{version}). Do you want to install it?
     The game will be restarted in order to apply the update.
   android_content: |
-    A new Hachimi Edge update is available (%{version}). Do you want to install it?
+    A new Hachimi update is available (%{version}). Do you want to install it?
 
     Tap "Yes" to open UmaPatcher Edge and re-patch your current game.
-    (No full game or APK re-download required, you only need to patch again like you normally would as UmaPatcher Edge always downloads the latest Hachimi Edge version.)
+    (No full game or APK re-download required, you only need to patch again like you normally would as UmaPatcher Edge always downloads the latest Hachimi version.)
 
 updating_dialog:
   title: "Updating"

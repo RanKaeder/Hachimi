@@ -85,7 +85,6 @@ clean
 
 cp -r -v ./tools/android/zygisk-template "$ZYGISK_BUILD_DIR"
 copy_lib aarch64-linux-android arm64-v8a
-copy_lib armv7-linux-androideabi armeabi-v7a
 
 cat << EOF > "$ZYGISK_BUILD_DIR/module.prop"
 id=$MODID
