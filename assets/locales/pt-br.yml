@@ -1,4 +1,4 @@
-hachimi: "Hachimi Edge"
+hachimi: "Hachimi"
 
 windows:
   menu_open_key: "Seta direita"
@@ -222,6 +222,10 @@ config_editor:
   disable_factor_name_translation: "Desabilitar tradução dos nomes das centelhas"
   skill_data_desc: "Descrição detalhada das habilidades"
   hide_ingame_ui_hotkey: "Atalho para esconder a UI do jogo"
+  notifier_host: "Host do notifier (sem / no final)"
+  notifier_timeout_in_ms_restart: "Timeout do notifier em ms\nRequer reinício completo"
+  save_race_response_msgpack: "Salvar dados de corrida"
+  export_circle_fan_counts: "Exportar contagem de fãs do círculo"
   hide_ingame_ui_hotkey_info: >-
     Esta opção permite que um atalho seja utilizado para alternar a visualização da UI do jogo.
     No Android, você pode tocar três vezes rapidamente no canto superior direito da tela.
