@@ -2979,6 +2979,22 @@ impl ConfigEditor {
                     }
                 }
                 ui.end_row();
+
+                ui.label(t!("config_editor.notifier_host"));
+                ui.text_edit_singleline(&mut config.notifier_host);
+                ui.end_row();
+
+                ui.label(t!("config_editor.notifier_timeout_in_ms_restart"));
+                ui.add(egui::Slider::new(&mut config.notifier_timeout_ms, 10..=500).step_by(10.0));
+                ui.end_row();
+
+                ui.label(t!("config_editor.save_race_response_msgpack"));
+                ui.checkbox(&mut config.enable_race_response_dump, "");
+                ui.end_row();
+
+                ui.label(t!("config_editor.export_circle_fan_counts"));
+                ui.checkbox(&mut config.export_circle_fan_counts, "");
+                ui.end_row();
             }
 
             if should_show_option(search, &t!("config_editor.live_slider_always_show")) {
