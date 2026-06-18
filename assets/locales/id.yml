@@ -1,4 +1,4 @@
-hachimi: "Hachimi Edge"
+hachimi: "Hachimi"
 
 windows:
   menu_open_key: "Panah kanan"
@@ -193,6 +193,10 @@ config_editor:
   cyspring_mono_uncap_frame_scale: "Buka skala frame Mono CySpring"
   disable_skill_name_translation: "Matikan translasi nama skill"
   hide_ingame_ui_hotkey: "Sembunyikan hotkey UI dalam game"
+  notifier_host: "Host notifier (tanpa / di akhir)"
+  notifier_timeout_in_ms_restart: "Waktu timeout notifier dalam ms\nPerlu restart penuh"
+  save_race_response_msgpack: "Simpan data race"
+  export_circle_fan_counts: "Ekspor jumlah fan circle"
   hide_ingame_ui_hotkey_info: >-
     Opsi ini memungkinkan tombol pintasan untuk mengaktifkan/menonaktifkan UI di dalam game.
     Untuk Android, kamu bisa mengetuk tiga kali di bagian kanan atas layar.
@@ -285,10 +289,10 @@ update_prompt_dialog:
   title: "Pembaruan tersedia!"
   content: "Versi terbaru Hachimi telah tersedia (%{version}). Apa kamu ingin memasangnya? Game akan dimulai ulang saat proses penerapan pembaruan."
   android_content: |
-    Pembaruan Hachimi Edge tersedia (%{version}). Apakah kamu ingin memasangnya?
+    Update Hachimi baru tersedia (%{version}). Apakah Anda ingin menginstalnya?
 
-    Ketuk "Ya" untuk membuka UmaPatcher Edge dan patch ulang game kamu.
-    (Tidak perlu mengunduh ulang data game atau APK, kamu hanya perlu patch lagi seperti biasanya karena UmaPatcher Edge selalu mengunduh versi Hachimi Edge terbaru.)
+    Ketuk "Ya" untuk membuka UmaPatcher Edge dan re-patch game Anda.
+    (Tidak perlu download ulang full game atau APK, Anda hanya perlu patch lagi seperti biasanya karena UmaPatcher Edge selalu mendownload versi Hachimi terbaru.)
 
 updating_dialog:
   title: "Memperbarui"
