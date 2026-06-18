@@ -1,4 +1,4 @@
-hachimi: "Hachimi Edge"
+hachimi: "Hachimi"
 
 windows:
   menu_open_key: "Flecha Derecha"
@@ -194,6 +194,10 @@ config_editor:
   cyspring_mono_uncap_frame_scale: "Desbloquear escala de frames del CySpring Mono"
   disable_skill_name_translation: "No traducir habilidades"
   hide_ingame_ui_hotkey: "Atajo para ocultar UI del juego"
+  notifier_host: "Host del notifier (sin / al final)"
+  notifier_timeout_in_ms_restart: "Tiempo de espera del notifier en ms\nRequiere reinicio completo"
+  save_race_response_msgpack: "Guardar datos de carrera"
+  export_circle_fan_counts: "Exportar recuento de fans del círculo"
   hide_ingame_ui_hotkey_info: >-
     Esta opción te permite asignar una tecla para alternar la UI del juego.
     En Android, puedes tocar tres veces la parte superior derecha de la pantalla.
@@ -289,10 +293,10 @@ update_prompt_dialog:
     ¿Quieres instalarla ahora? El juego será reiniciado para así poder
     aplicar la actualización.
   android_content: |
-    Se ha encontrado una nueva actualización de Hachimi Edge (%{version}). ¿Quieres instalarla ahora?
+    Se ha encontrado una nueva actualización de Hachimi (%{version}).\n¿Quieres instalarla ahora?
 
-    Pulsar en "Sí" abrirá UmaPatcher Edge para que vuelvas a parchear el juego.
-    (No será necesario volver a descargar el juego o los APK, solo vuelve a parchear el juego nuevamente para que se descargue e instale la nueva versión de Hachimi Edge.)
+    Pulsa "Sí" para abrir UmaPatcher Edge para volver a parchear el juego.
+    (No es necesario volver a descargar el juego o los APK, solo parchea el juego nuevamente como normalmente lo harías. UmaPatcher Edge siempre descargará la nueva versión de Hachimi.)
 
 updating_dialog:
   title: "Actualizando"
