@@ -9,7 +9,7 @@ use crate::{core::{gui, plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il
 
 use super::{game::{Game, Region}, ipc, plurals, template, template_filters, tl_repo, utils, Error, Interceptor};
 
-pub const REPO_PATH: &str = "kairusds/Hachimi-Edge";
+pub const REPO_PATH: &str = "RanKaeder/Hachimi";
 pub const GITHUB_API: &str = "https://api.github.com/repos";
 pub const CODEBERG_API: &str = "https://codeberg.org/api/v1/repos";
 pub const WEBSITE_URL: &str = "https://hachimi.noccu.art";
@@ -275,7 +275,6 @@ impl Hachimi {
                 return;
             }
         };
-
         if self.game.region == Region::Global {
             for id in 55..=66 {
                 new_data.localize_dict.remove(&format!("Common{id:04}"));
@@ -299,6 +298,11 @@ impl Hachimi {
         let data = SkillDataDesc::load_from_db();
         if !data.descs.is_empty() {
             self.skill_data_desc.store(Arc::new(data));
+        }
+
+        if self.hooking_finished.load(atomic::Ordering::Relaxed) {
+            use crate::il2cpp::ext::LocalizedDataExt;
+            let _mods_bundles = self.localized_data.load().load_mods_asset_bundles();
         }
     }
 
@@ -427,6 +431,10 @@ impl Hachimi {
                 info!("Plugin init failed");
             }
         }
+
+        // 现在 IL2CPP 已经完全初始化，可以安全地扫描和加载 mods AssetBundles
+        use crate::il2cpp::ext::LocalizedDataExt;
+        let _mods_bundles = self.localized_data.load().load_mods_asset_bundles();
     }
 
     pub fn get_data_path<P: AsRef<Path>>(&self, rel_path: P) -> PathBuf {
@@ -884,6 +892,14 @@ pub struct Config {
     pub replace_to_builtin_font: bool,
     #[serde(default)]
     pub disabled_hooks: FnvHashSet<String>,
+    #[serde(default = "Config::default_notifier_host")]
+    pub notifier_host: String,
+    #[serde(default = "Config::default_notifier_timeout_ms")]
+    pub notifier_timeout_ms: u64,
+    #[serde(default = "Config::default_enable_race_response_dump")]
+    pub enable_race_response_dump: bool,
+    #[serde(default = "Config::default_export_circle_fan_counts")]
+    pub export_circle_fan_counts: bool,
 
     // theme settings
     #[serde(default = "Config::default_ui_accent")]
@@ -921,6 +937,10 @@ impl Config {
     fn default_live_vocals_swap() -> [i32; 6] { [0; 6] }
     fn default_champions_live_resource_id() -> i32 { 15 }
     fn default_champions_live_year() -> i32 { 2025 }
+    fn default_notifier_host() -> String { "http://127.0.0.1:4693".to_owned() }
+    fn default_notifier_timeout_ms() -> u64 { 100 }
+    fn default_enable_race_response_dump() -> bool { false }
+    fn default_export_circle_fan_counts() -> bool { false }
     pub fn default_ui_accent() -> egui::Color32 { egui::Color32::from_rgb(100, 150, 240) }
     pub fn default_window_fill() -> egui::Color32 { egui::Color32::from_rgba_premultiplied(27, 27, 27, 220) }
     pub fn default_panel_fill() -> egui::Color32 { egui::Color32::from_rgba_premultiplied(27, 27, 27, 220) }
