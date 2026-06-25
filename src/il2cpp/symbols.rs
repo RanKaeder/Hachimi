@@ -566,23 +566,34 @@ pub fn create_delegate(delegate_class: *mut Il2CppClass, args_count: i32, method
 
 // Singleton-like class wrapper
 pub struct SingletonLike {
-    instance_field: *mut FieldInfo,
+    get_instance_method: *const MethodInfo,
 }
 
 impl SingletonLike {
     pub fn new(class: *mut Il2CppClass) -> Option<SingletonLike> {
-        let instance_field = get_field_from_name(class, c"_instance");
-        if instance_field.is_null() {
+        let method = il2cpp_class_get_method_from_name(class, c"get_Instance".as_ptr(), 0);
+        if method.is_null() {
+            warn!("SingletonLike: get_Instance method not found");
             return None;
         }
 
         Some(SingletonLike {
-            instance_field
+            get_instance_method: method
         })
     }
 
     pub fn instance(&self) -> *mut Il2CppObject {
-        get_static_field_object_value(self.instance_field)
+        let mut exc: *mut Il2CppException = null_mut();
+        let obj = il2cpp_runtime_invoke(
+            self.get_instance_method,
+            null_mut(),
+            std::ptr::null_mut(),
+            &mut exc
+        );
+        if !exc.is_null() {
+            warn!("SingletonLike: get_Instance threw an exception");
+        }
+        obj
     }
 }
 
