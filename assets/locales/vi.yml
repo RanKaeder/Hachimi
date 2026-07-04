@@ -151,6 +151,7 @@ config_editor:
   story_text_speed_multiplier: "Hệ số tốc độ văn bản truyện"
   force_allow_dynamic_camera: "Buộc cho phép dynamic camera"
   live_theater_allow_same_chara: "Cho phép cùng nhân vật trong live"
+  unlock_live_chara: "Mở khóa nhân vật Live"
   physics_update_mode: "Chế độ vật lý"
   hide_ingame_ui_hotkey: "Phím tắt ẩn giao diện trong game"
   notifier_host: "Host notifier (không kết thúc bằng /)"

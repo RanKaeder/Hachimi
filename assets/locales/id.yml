@@ -189,6 +189,7 @@ config_editor:
   story_text_speed_multiplier: "Kecepatan teks cerita"
   force_allow_dynamic_camera: "Paksa nyalakan kamera dinamis (POV)"
   live_theater_allow_same_chara: "Izinkan karakter yang sama untuk konser"
+  unlock_live_chara: "Buka semua karakter Live"
   physics_update_mode: "Mode update fisik"
   cyspring_mono_uncap_frame_scale: "Buka skala frame Mono CySpring"
   disable_skill_name_translation: "Matikan translasi nama skill"
