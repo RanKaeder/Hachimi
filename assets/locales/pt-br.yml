@@ -215,6 +215,7 @@ config_editor:
   force_allow_dynamic_camera: "Forçar uso da câmera dinâmica"
   free_camera: "Câmera livre"
   live_theater_allow_same_chara: "Permitir personagens repetidos nos shows"
+  unlock_live_chara: "Desbloquear personagens do Live"
   physics_update_mode: "Modo de atualização das físicas"
   cyspring_mono_uncap_frame_scale: "Desbloquear escala de quadros CySpring Mono"
   disable_skill_name_translation: "Desabilitar tradução dos nomes das habilidades"

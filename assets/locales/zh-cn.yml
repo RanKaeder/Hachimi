@@ -203,6 +203,7 @@ config_editor:
   force_allow_dynamic_camera: "强制启用动态镜头"
   free_camera: "自由视角"
   live_theater_allow_same_chara: "在 Live 剧场中允许设置多个相同角色"
+  unlock_live_chara: "解锁 Live 角色"
   physics_update_mode: "物理引擎更新模式"
   disable_skill_name_translation: "禁用技能名称翻译"
   disable_factor_name_translation: "禁用因子名称翻译"
