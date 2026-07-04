@@ -194,6 +194,7 @@ config_editor:
   cyspring_mono_uncap_frame_scale: "Desbloquear escala de frames del CySpring Mono"
   disable_skill_name_translation: "No traducir habilidades"
   hide_ingame_ui_hotkey: "Atajo para ocultar UI del juego"
+  unlock_live_chara: "Desbloquear personajes de Live"
   notifier_host: "Host del notifier (sin / al final)"
   notifier_timeout_in_ms_restart: "Tiempo de espera del notifier en ms\nRequiere reinicio completo"
   save_race_response_msgpack: "Guardar datos de carrera"

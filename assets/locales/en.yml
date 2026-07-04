@@ -194,6 +194,7 @@ config_editor:
   story_text_speed_multiplier: "Story text speed multiplier"
   force_allow_dynamic_camera: "Force allow dynamic camera"
   live_theater_allow_same_chara: "Live theater allow same chara"
+  unlock_live_chara: "Unlock live chara"
   physics_update_mode: "Physics update mode"
   cyspring_mono_uncap_frame_scale: "CySpring Mono Frame Scale Uncap"
   disable_skill_name_translation: "Disable skill name translation"

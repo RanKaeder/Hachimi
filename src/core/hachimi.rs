@@ -741,6 +741,8 @@ pub struct Config {
     pub force_allow_dynamic_camera: bool,
     #[serde(default)]
     pub live_theater_allow_same_chara: bool,
+    #[serde(default)]
+    pub unlock_live_chara: bool,
     #[serde(default = "Config::default_live_vocals_swap")]
     pub live_vocals_swap: [i32; 6],
     #[serde(default)]

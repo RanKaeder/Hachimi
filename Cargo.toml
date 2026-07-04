@@ -1,6 +1,6 @@
 [package]
 name = "hachimi"
-version = "0.26.3-mods"
+version = "0.26.4-mods"
 edition = "2021"
 
 [lib]
@@ -51,6 +51,7 @@ simplelog = "0.12.2"
 crossbeam-channel = "0.5"
 egui_commonmark = { version = "0.22", features = ["better_syntax_highlighting"] }
 libc = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"
