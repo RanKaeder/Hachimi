@@ -2910,6 +2910,9 @@ impl ConfigEditor {
                 ui.label(t!("config_editor.live_theater_allow_same_chara"));
                 ui.checkbox(&mut config.live_theater_allow_same_chara, "");
                 ui.end_row();
+                ui.label(t!("config_editor.unlock_live_chara"));
+                ui.checkbox(&mut config.unlock_live_chara, "");
+                ui.end_row();
             }
 
             if should_show_option(search, &t!("config_editor.live_vocals_swap")) {

@@ -762,3 +762,72 @@ pub fn get_champions_live_max_year() -> i32 {
     }
     max_year
 }
+
+/// Extracts `(chara_id, body_type)` from a `pfb_bdy` asset logical name, e.g.
+/// "3d/chara/body/bdy1001_01/pfb_bdy1001_01" -> ("1001", "01").
+fn parse_pfb_bdy_name(name: &str) -> Option<(&str, &str)> {
+    if name.len() < 39 {
+        return None;
+    }
+    Some((&name[32..36], &name[37..39]))
+}
+
+/// Scans the (encrypted) meta asset db for character body models (`pfb_bdy*`) that don't have
+/// a corresponding `card_data` row yet, i.e. costumes that exist as 3D assets but were never
+/// "released" as a selectable card by the server. Returns the derived dress ids
+/// (`chara_id * 100 + body_type`) so callers can synthesize placeholder `card_data`/
+/// `card_rarity_data` rows for them, making them selectable in places like the live theater
+/// costume picker.
+pub fn find_meta_dress_ids() -> Vec<i32> {
+    let mut ids = Vec::new();
+
+    let meta_path = std::path::PathBuf::from(get_data_path()).join("meta");
+    let db_path_str = meta_path.to_string_lossy().to_string();
+
+    let conn = Connection::new();
+    AUTO_UNLOCK_NEXT_DB.store(true, Ordering::Relaxed);
+    if !Connection::Open(conn, db_path_str.to_il2cpp_string(), ptr::null_mut(), ptr::null_mut(), 0) {
+        return ids;
+    }
+
+    // Primary body model. Only variants using body_type 00/01 are counted, normalized to "01"
+    // (extra body_type variants like summer/winter uniforms are handled by the base costume).
+    let query = Connection::Query(conn, "SELECT n FROM a WHERE n LIKE '%pfb_bdy1____0_'".to_il2cpp_string());
+    if !query.is_null() {
+        while Query::Step(query) {
+            let n_ptr = Query::GetText(query, 0);
+            if let Some(name) = unsafe { n_ptr.as_ref() }.map(|s| s.as_utf16str().to_string()) {
+                if let Some((chara_id, body_type)) = parse_pfb_bdy_name(&name) {
+                    if body_type.parse::<i32>().unwrap_or(99) <= 1 {
+                        if let Ok(id) = format!("{}01", chara_id).parse::<i32>() {
+                            ids.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        Query::Dispose(query);
+    }
+
+    // Secondary body model (e.g. alternate costume variant), always offset by +1 from its id.
+    let query2 = Connection::Query(conn, "SELECT n FROM a WHERE n LIKE '%pfb_bdy2____0_'".to_il2cpp_string());
+    if !query2.is_null() {
+        while Query::Step(query2) {
+            let n_ptr = Query::GetText(query2, 0);
+            if let Some(name) = unsafe { n_ptr.as_ref() }.map(|s| s.as_utf16str().to_string()) {
+                if let Some((chara_id, body_type)) = parse_pfb_bdy_name(&name) {
+                    if let Ok(id) = format!("{}{}", chara_id, body_type).parse::<i32>() {
+                        ids.push(id + 1);
+                    }
+                }
+            }
+        }
+        Query::Dispose(query2);
+    }
+
+    Connection::CloseDB(conn);
+
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}

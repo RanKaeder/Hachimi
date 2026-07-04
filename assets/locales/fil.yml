@@ -151,6 +151,7 @@ config_editor:
   story_text_speed_multiplier: "Multiplier ng bilis ng text sa kwento"
   force_allow_dynamic_camera: "Pwersahang payagan ang dynamic camera"
   live_theater_allow_same_chara: "Payagan ang katulad na character sa live theater"
+  unlock_live_chara: "I-unlock ang mga karakter sa Live"
   physics_update_mode: "Mode ng pag-update ng physics"
   disable_skill_name_translation: "I-disable ang pag-translate ng mga skill name"
   hide_ingame_ui_hotkey: "I-enable ang hotkey ng pagtago ng game UI"

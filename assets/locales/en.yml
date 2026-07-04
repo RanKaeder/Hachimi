@@ -201,6 +201,7 @@ config_editor:
   free_camera: "Free Camera"
   free_camera_settings: "Free Camera settings"
   live_theater_allow_same_chara: "Live theater allow same chara"
+  unlock_live_chara: "Unlock live chara"
   physics_update_mode: "Physics update mode"
   cyspring_mono_uncap_frame_scale: "CySpring Mono Frame Scale Uncap"
   disable_skill_name_translation: "Disable skill name translation"
