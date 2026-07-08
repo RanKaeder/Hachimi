@@ -1,4 +1,4 @@
-use std::{collections::HashSet, env, fs, io::Write, path::Path, sync::RwLock, time::Duration};
+use std::{collections::{HashSet, VecDeque}, env, fs, io::Write, path::Path, sync::{Mutex, RwLock}, time::Duration};
 
 use chrono::Local;
 use crate::core::{game::Region, Hachimi, utils::get_masterdb_path};
@@ -26,7 +26,18 @@ static AGENT: Lazy<ureq::Agent> = Lazy::new(|| {
 });
 static REQUEST: Lazy<String> = Lazy::new(|| Hachimi::instance().config.load().notifier_host.clone() + "/notify/request");
 static RESPONSE: Lazy<String> = Lazy::new(|| Hachimi::instance().config.load().notifier_host.clone() + "/notify/response");
-static LAST_POST_URL: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
+// FIFO queue of request URLs, popped by DecompressResponse in the same order Post pushed them.
+// Cute.Http's task queue is serial, so Post (push) and DecompressResponse (pop) strictly
+// alternate per request - unlike a single "last URL" global, this can't be clobbered by a
+// later, unrelated request's Post() call racing ahead of the earlier response's decompression.
+static POST_URL_QUEUE: Lazy<Mutex<VecDeque<String>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+const POST_URL_QUEUE_CAPACITY: usize = 64;
+// Request side: parks the uncompressed body produced by CompressRequest, keyed by the identity
+// (pointer value) of the *compressed* array it returns. WWWRequest.Post receives that exact same
+// compressed array as `post_data`, so matching on pointer identity (rather than call order) is
+// exact - it can't be confused by concurrent/out-of-order requests the way a FIFO queue could.
+static PENDING_REQUESTS: Lazy<Mutex<VecDeque<(usize, Vec<u8>)>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+const PENDING_REQUEST_CAPACITY: usize = 64;
 static UNLOCK_CHARA_IDS: Lazy<RwLock<Option<Vec<i32>>>> = Lazy::new(|| RwLock::new(None));
 static UNLOCK_DRESS_IDS: Lazy<RwLock<Option<Vec<i32>>>> = Lazy::new(|| RwLock::new(None));
 static UNLOCK_CARD_ROWS: Lazy<RwLock<Option<Vec<(i32, i32)>>>> = Lazy::new(|| RwLock::new(None));
@@ -50,22 +61,86 @@ extern "C" fn Post(
     post_data: *mut Il2CppObject,
     headers: *mut Il2CppObject,
 ) -> *mut Il2CppObject {
-    if let Some(url_ref) = unsafe { url.as_ref() } {
-        let url_str = url_ref.as_utf16str().to_string();
-        if let Ok(mut guard) = LAST_POST_URL.write() {
-            *guard = url_str;
+    let game_url = unsafe { url.as_ref() }.map(|url_ref| url_ref.as_utf16str().to_string());
+
+    if let Some(url_str) = &game_url {
+        if let Ok(mut queue) = POST_URL_QUEUE.lock() {
+            if queue.len() >= POST_URL_QUEUE_CAPACITY {
+                queue.pop_front();
+            }
+            queue.push_back(url_str.clone());
+        }
+    }
+
+    // Forward the request body here (not in CompressRequest) so it can be tagged with the URL,
+    // which is only known at this point. Matched by exact pointer identity - see PENDING_REQUESTS.
+    if let Some(body) = take_pending_request(post_data as usize) {
+        if let Err(e) = post_with_url(REQUEST.as_str(), game_url.as_deref(), &body) {
+            warn!("notifier: failed to forward request to '{}': {}", REQUEST.as_str(), e);
         }
     }
 
     get_orig_fn!(Post, PostFn)(this, url, post_data, headers)
 }
 
-fn save_response_msgpack(data: &[u8]) {
+/// Pops the URL of the request that corresponds to the response currently being decompressed.
+/// See [`POST_URL_QUEUE`] for why this is FIFO instead of a single "last URL" value.
+fn take_next_post_url() -> Option<String> {
+    POST_URL_QUEUE.lock().ok().and_then(|mut queue| queue.pop_front())
+}
+
+/// Parks a request body produced by `CompressRequest`, keyed by the pointer identity of the
+/// compressed array it returns (which `Post` receives verbatim as `post_data`).
+fn queue_pending_request(compressed: usize, body: Vec<u8>) {
+    let Ok(mut pending) = PENDING_REQUESTS.lock() else {
+        return;
+    };
+    if pending.len() >= PENDING_REQUEST_CAPACITY {
+        pending.pop_front();
+    }
+    pending.push_back((compressed, body));
+}
+
+/// Returns the parked body only on an exact pointer-identity match against `compressed`.
+fn take_pending_request(compressed: usize) -> Option<Vec<u8>> {
+    let mut pending = PENDING_REQUESTS.lock().ok()?;
+    let index = pending.iter().position(|(ptr, _)| *ptr == compressed)?;
+    pending.remove(index).map(|(_, body)| body)
+}
+
+/// Percent-encodes a header value so it's always a valid HTTP header (mirrors
+/// hachimi-httpforward-plugin's encoding so downstream tools can decode it the same way).
+fn header_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b' '..=b'~' => encoded.push(byte as char),
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
+/// POSTs `body` to `url`, tagging it with an `X-Hachimi-Game-Url` header when available so the
+/// receiver can route by URL directly instead of having to inspect/guess from the raw body.
+fn post_with_url(url: &str, game_url: Option<&str>, body: &[u8]) -> Result<(), Box<ureq::Error>> {
+    let mut request = AGENT.post(url);
+    if let Some(game_url) = game_url {
+        request = request.header("X-Hachimi-Game-Url", &header_value(game_url));
+    }
+    request.send(body)?;
+    Ok(())
+}
+
+fn save_response_msgpack(data: &[u8], url: Option<&str>) {
     if !Hachimi::instance().config.load().enable_race_response_dump {
         return;
     }
 
-    if !is_target_race_response_url() {
+    if !is_target_race_response_url(url) {
         return;
     }
 
@@ -77,7 +152,7 @@ fn save_response_msgpack(data: &[u8]) {
     }
 
     let now = Local::now();
-    let url_suffix = current_url_suffix();
+    let url_suffix = current_url_suffix(url);
     let out_path = out_dir.join(format!(
         "{} {}.msgpack",
         now.format("%Y-%m-%d %H-%M-%S-%3f"),
@@ -89,12 +164,12 @@ fn save_response_msgpack(data: &[u8]) {
     }
 }
 
-fn save_circle_monthly_csv(data: &[u8]) {
+fn save_circle_monthly_csv(data: &[u8], url: Option<&str>) {
     if !Hachimi::instance().config.load().export_circle_fan_counts {
         return;
     }
 
-    if !is_circle_detail_response_url() {
+    if !is_circle_detail_response_url(url) {
         return;
     }
 
@@ -225,25 +300,17 @@ fn save_circle_monthly_csv(data: &[u8]) {
     }
 }
 
-fn is_target_race_response_url() -> bool {
-    LAST_POST_URL
-        .read()
-        .map(|url| RACE_URL_KEYWORDS.iter().any(|keyword| url.contains(keyword)))
+fn is_target_race_response_url(url: Option<&str>) -> bool {
+    url.map(|url| RACE_URL_KEYWORDS.iter().any(|keyword| url.contains(keyword)))
         .unwrap_or(false)
 }
 
-fn is_circle_detail_response_url() -> bool {
-    LAST_POST_URL
-        .read()
-        .map(|url| url.contains("/umamusume/circle/detail"))
-        .unwrap_or(false)
+fn is_circle_detail_response_url(url: Option<&str>) -> bool {
+    url.map(|url| url.contains("/umamusume/circle/detail")).unwrap_or(false)
 }
 
-fn current_url_suffix() -> String {
-    LAST_POST_URL
-        .read()
-        .ok()
-        .and_then(|url| {
+fn current_url_suffix(url: Option<&str>) -> String {
+    url.and_then(|url| {
             let trimmed = url.trim_end_matches('/');
             if trimmed.is_empty() {
                 None
@@ -1304,11 +1371,11 @@ fn make_byte_array(bytes: &[u8]) -> Option<*mut Il2CppArray> {
 }
 
 extern "C" fn CompressRequest(data: *mut Il2CppArray) -> *mut Il2CppArray {
-    unsafe {
-        let buffer = Array::<u8>::from(data);
-        let _ = AGENT.post(REQUEST.as_str()).send(&*buffer.as_slice());
-    }
-    get_orig_fn!(CompressRequest, CompressRequestFn)(data)
+    let body = unsafe { Array::<u8>::from(data).as_slice().to_vec() };
+    let compressed = get_orig_fn!(CompressRequest, CompressRequestFn)(data);
+    // Park the body until Post supplies the URL; matched by the compressed array's identity.
+    queue_pending_request(compressed as usize, body);
+    compressed
 }
 extern "C" fn DecompressResponse(data: *mut Il2CppArray) -> *mut Il2CppArray {
     let decompressed = get_orig_fn!(DecompressResponse, DecompressResponseFn)(data);
@@ -1316,16 +1383,21 @@ extern "C" fn DecompressResponse(data: *mut Il2CppArray) -> *mut Il2CppArray {
         let buffer = Array::<u8>::from(decompressed);
         let data = buffer.as_slice();
 
+        // Pop the URL queued by this response's originating request; see POST_URL_QUEUE.
+        let response_url = take_next_post_url();
+
+        save_circle_monthly_csv(data, response_url.as_deref());
+        save_response_msgpack(data, response_url.as_deref());
+        if let Err(e) = post_with_url(RESPONSE.as_str(), response_url.as_deref(), data) {
+            warn!("notifier: failed to forward response to '{}': {}", RESPONSE.as_str(), e);
+        }
+
         if let Some(modified) = patch_unlock_live_chara_response(data) {
             if let Some(new_array) = make_byte_array(&modified) {
                 return new_array;
             }
             warn!("unlock_live_chara patch generated data but failed to allocate managed byte array");
         }
-
-        save_circle_monthly_csv(data);
-        save_response_msgpack(data);
-        let _ = AGENT.post(RESPONSE.as_str()).send(&*data);
     }
     decompressed
 }
