@@ -1,16 +1,18 @@
 use std::{os::raw::c_uint, ptr, sync::{Arc, atomic::{self, AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicUsize}}};
 
 use rust_i18n::t;
-use windows::{core::{w, HSTRING}, Win32::{
+use windows::{core::{w, HSTRING, BOOL}, Win32::{
     Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW},
-    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+    System::{LibraryLoader::GetModuleHandleW, Threading::{GetCurrentProcessId, GetCurrentThreadId}},
     UI::{
         Input::{Ime::ISC_SHOWUICOMPOSITIONWINDOW, KeyboardAndMouse::VK_RETURN},
         WindowsAndMessaging::{
-            CallNextHookEx, CallWindowProcW, DefWindowProcW, FindWindowW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
+            CallNextHookEx, CallWindowProcW, DefWindowProcW, EnumWindows, FindWindowW, GetClassNameW, GetClientRect,
+            GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
             SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, SetWindowTextW,
-            GWLP_WNDPROC, HCBT_MINMAX, HHOOK, SW_RESTORE, WH_CBT, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WNDPROC,
+            GWLP_WNDPROC, HCBT_MINMAX, HHOOK, MSG, PM_REMOVE, SW_RESTORE, WH_CBT, WH_GETMESSAGE, WM_CLOSE,
+            WM_KEYDOWN, WM_NULL, WM_SYSKEYDOWN, WNDPROC,
             WM_IME_SETCONTEXT, WM_IME_NOTIFY, WM_ACTIVATE, WA_INACTIVE, GWL_STYLE, SIZE_MAXIMIZED,
             SIZE_MINIMIZED,
             SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ENTERSIZEMOVE,
@@ -34,6 +36,12 @@ static RESIZE_WAIT_FRAMES: AtomicI32 = AtomicI32::new(0);
 static RESIZE_GENERATION: AtomicU32 = AtomicU32::new(0);
 static RESIZE_WAIT_FOR_END_FRAME_ADDR: AtomicUsize = AtomicUsize::new(0);
 static FREEFORM_LANDSCAPE_CLOSE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+// Set when GWLP_WNDPROC subclassing didn't actually take effect (e.g. another mod like
+// umamusume-localify installs its own SetWindowLongPtrW hook that unconditionally swallows
+// any GWLP_WNDPROC change once it owns the window, so wnd_proc below is never invoked by
+// Windows). In that case we fall back to a thread-local WH_KEYBOARD hook just to keep the
+// menu/UI toggle hotkeys working.
+static WNDPROC_HIJACK_BLOCKED: AtomicBool = AtomicBool::new(false);
 
 pub fn get_target_hwnd() -> HWND {
     HWND(TARGET_HWND.load(atomic::Ordering::Relaxed) as *mut _)
@@ -499,7 +507,10 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
                 }
             }
 
+            let hachimi = Hachimi::instance();
             if current_key == Hachimi::instance().config.load().windows.menu_open_key {
+                // Lazy init GUI if not already initialized (for late loading mode)
+                hachimi.try_lazy_init_gui();
                 let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
                     return unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
                 };
@@ -648,6 +659,204 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
     LRESULT(0)
 }
 
+// Finds a top-level window belonging to the current process by class name only,
+// ignoring the window title. Used as a fallback when FindWindowW (exact title match)
+// fails, which can happen if another mod (e.g. localify's customTitleName) has
+// renamed the game window.
+unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid != unsafe { GetCurrentProcessId() } {
+        return true.into();
+    }
+
+    let mut class_name = [0u16; 256];
+    let len = unsafe { GetClassNameW(hwnd, &mut class_name) };
+    if len > 0 && String::from_utf16_lossy(&class_name[..len as usize]) == "UnityWndClass" {
+        unsafe { *(lparam.0 as *mut HWND) = hwnd; }
+        return false.into();
+    }
+
+    true.into()
+}
+
+fn find_game_window_by_class() -> HWND {
+    let mut result = HWND::default();
+    unsafe {
+        let _ = EnumWindows(Some(enum_windows_proc), LPARAM(&mut result as *mut HWND as isize));
+    }
+    result
+}
+
+static mut HGETMSGHOOK: HHOOK = HHOOK(ptr::null_mut());
+
+// Mirrors the relevant parts of `wnd_proc`'s message handling, but returns whether the
+// message should be "eaten" (prevented from reaching the game/other mods) instead of
+// returning an LRESULT directly, since we don't own the WndProc chain here.
+fn process_fallback_message(hwnd: HWND, umsg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
+    match umsg {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let current_key = wparam.0 as u16;
+            let repeat = ((lparam.0 as usize) & (1usize << 30)) != 0;
+
+            if gui::is_keybind_capture_active() {
+                let display = utils::vk_to_display_label(current_key);
+                gui::report_keybind_capture(current_key, display);
+                return true;
+            }
+
+            if current_key == 0x4B { // Virtual keycode for "K", see the get_key method on gui_impl/input.rs
+                let hotkey_vk = Hachimi::instance().config.load().windows.hide_ingame_ui_hotkey_bind;
+
+                if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(hotkey_vk as i32) < 0 } {
+                    if let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) {
+                        gui.set_consuming_input(false);
+                    }
+                    return true;
+                }
+            }
+
+            let hachimi = Hachimi::instance();
+            if current_key == hachimi.config.load().windows.menu_open_key {
+                // Lazy init GUI if not already initialized (for late loading mode)
+                hachimi.try_lazy_init_gui();
+                let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+                    return false;
+                };
+                gui.toggle_menu();
+                return true;
+            } else if current_key == hachimi.config.load().windows.hide_ingame_ui_hotkey_bind && hachimi.config.load().hide_ingame_ui_hotkey {
+                Thread::main_thread().schedule(Gui::toggle_game_ui);
+            }
+
+            if !Gui::is_gui_input_active_atomic() {
+                free_camera::on_windows_key(current_key, true, repeat);
+                if free_camera::is_windows_key_bound(current_key) {
+                    return true;
+                }
+            }
+        },
+        WM_KEYUP | WM_SYSKEYUP => {
+            let current_key = wparam.0 as u16;
+            if !Gui::is_gui_input_active_atomic() {
+                free_camera::on_windows_key(current_key, false, false);
+                if free_camera::is_windows_key_bound(current_key) {
+                    return true;
+                }
+            }
+        },
+        WM_RBUTTONDOWN => {
+            if !Gui::is_gui_input_active_atomic() {
+                free_camera::on_mouse_button(true);
+                if free_camera::is_enabled() {
+                    return true;
+                }
+            }
+        },
+        WM_RBUTTONUP => {
+            if !Gui::is_gui_input_active_atomic() {
+                free_camera::on_mouse_button(false);
+                if free_camera::is_enabled() {
+                    return true;
+                }
+            }
+        },
+        WM_MOUSEMOVE => {
+            if !Gui::is_gui_input_active_atomic() {
+                let x = (lparam.0 & 0xffff) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+                free_camera::on_mouse_move(x, y);
+                if free_camera::wants_windows_input_capture() {
+                    return true;
+                }
+            }
+        },
+        WM_MOUSEWHEEL => {
+            if !Gui::is_gui_input_active_atomic() {
+                let delta = (wparam.0 >> 16) as u16 as i16;
+                free_camera::on_mouse_wheel(delta);
+                if free_camera::is_enabled() {
+                    return true;
+                }
+            }
+        },
+        WM_INPUT => {
+            if !Gui::is_gui_input_active_atomic() && free_camera::is_enabled() {
+                return true;
+            }
+        },
+        _ => ()
+    }
+
+    // Only capture input if gui needs it
+    if !Gui::is_consuming_input_atomic() {
+        return false;
+    }
+
+    if umsg == WM_IME_SETCONTEXT {
+        let new_lparam = lparam.0 & !(ISC_SHOWUICOMPOSITIONWINDOW as isize);
+        unsafe { DefWindowProcW(hwnd, umsg, wparam, LPARAM(new_lparam)) };
+        return true;
+    }
+
+    if umsg == WM_IME_NOTIFY {
+        unsafe { DefWindowProcW(hwnd, umsg, wparam, lparam) };
+        return true;
+    }
+
+    // Extract the IME data BEFORE spanning the thread
+    let (is_ime, ime_commit, ime_preedit) = input::process_ime_sync(hwnd, umsg, lparam.0);
+
+    // Check if the input processor handles this message (Skip check if it is an IME msg)
+    if !input::is_handled_msg(umsg) && !is_ime {
+        return false;
+    }
+
+    std::thread::spawn(move || {
+        let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+            return;
+        };
+
+        // Inject IME strings directly into egui
+        if let Some(s) = ime_commit {
+            gui.input.events.push(egui::Event::Ime(egui::ImeEvent::Commit(s)));
+        }
+        if let Some(s) = ime_preedit {
+            gui.input.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(s)));
+        }
+
+        // Process standard Key/Mouse inputs ONLY if it wasn't an IME message
+        if !is_ime {
+            let zoom_factor = gui.context.zoom_factor();
+            input::process(&mut gui.input, zoom_factor, umsg, wparam.0, lparam.0);
+        }
+    });
+
+    if is_ime {
+        return true;
+    }
+
+    Gui::wants_input_atomic()
+}
+
+extern "system" fn get_message_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Only used as a fallback for input handling (menu/UI toggle hotkeys, free camera,
+    // GUI mouse/keyboard/IME input) when wnd_proc is never actually invoked by Windows
+    // (GWLP_WNDPROC subclassing got silently blocked by another mod, e.g. localify's own
+    // anti-hijack SetWindowLongPtrW hook).
+    if ncode >= 0 && wparam.0 == PM_REMOVE.0 as usize && WNDPROC_HIJACK_BLOCKED.load(atomic::Ordering::Acquire) {
+        let msg = unsafe { &mut *(lparam.0 as *mut MSG) };
+        if msg.hwnd.0 == get_target_hwnd().0 {
+            if process_fallback_message(msg.hwnd, msg.message, msg.wParam, msg.lParam) {
+                // Swallow the message so it doesn't also get delivered to the game/other mods
+                msg.message = WM_NULL;
+            }
+        }
+    }
+
+    unsafe { CallNextHookEx(Some(HGETMSGHOOK), ncode, wparam, lparam) }
+}
+
 static mut HCBTHOOK: HHOOK = HHOOK(ptr::null_mut());
 extern "system" fn cbt_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if ncode == HCBT_MINMAX as i32 &&
@@ -675,7 +884,12 @@ pub fn init() {
             // is case insensitive so it works. why am i surprised
             w!("umamusume")
         };
-        let hwnd = FindWindowW(w!("UnityWndClass"), window_name).unwrap_or_default();
+        let mut hwnd = FindWindowW(w!("UnityWndClass"), window_name).unwrap_or_default();
+        if hwnd.0 == ptr::null_mut() {
+            warn!("FindWindowW by title failed, falling back to class-only window search \
+                (game window may have been renamed by another mod)");
+            hwnd = find_game_window_by_class();
+        }
         if hwnd.0 == ptr::null_mut() {
             error!("Failed to find game window");
             return;
@@ -709,6 +923,19 @@ pub fn init() {
         else {
             WNDPROC_ORIG.store(wnd_proc_orig, atomic::Ordering::Release);
             GAME_WNDPROC_ORIG.store(wnd_proc_orig, atomic::Ordering::Release);
+
+            // Some other mod (e.g. umamusume-localify) may have already hooked the
+            // exported SetWindowLongPtrW and unconditionally swallow any GWLP_WNDPROC
+            // change once it owns the window, in which case the call above reports
+            // success but never actually installs wnd_proc at the OS level. Verify by
+            // reading the value back.
+            let actually_installed = GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == wnd_proc as *const () as isize;
+            if !actually_installed {
+                warn!("GWLP_WNDPROC subclassing was silently blocked (likely by another \
+                    mod that also hooks SetWindowLongPtrW, e.g. umamusume-localify); \
+                    falling back to a WH_KEYBOARD hook for the menu/UI toggle hotkeys");
+                WNDPROC_HIJACK_BLOCKED.store(true, atomic::Ordering::Release);
+            }
 
             if let Ok(user32) = GetModuleHandleW(w!("user32.dll")) {
                 let set_window_long_ptr_w_addr = utils::get_proc_address(user32, c"SetWindowLongPtrW");
@@ -746,6 +973,13 @@ pub fn init() {
             HCBTHOOK = hhook;
         }
 
+        if WNDPROC_HIJACK_BLOCKED.load(atomic::Ordering::Acquire) {
+            info!("Adding fallback WH_GETMESSAGE hook (menu/UI toggle hotkeys, mouse/keyboard/IME input for GUI)");
+            if let Ok(hhook) = SetWindowsHookExW(WH_GETMESSAGE, Some(get_message_proc), None, GetCurrentThreadId()) {
+                HGETMSGHOOK = hhook;
+            }
+        }
+
         // Apply always on top
         if hachimi.window_always_on_top.load(atomic::Ordering::Relaxed) {
             _ = utils::set_window_topmost(hwnd, true);
@@ -776,6 +1010,13 @@ pub fn uninit() {
                 error!("Failed to remove CBT hook: {}", e);
             }
             HCBTHOOK = HHOOK(ptr::null_mut());
+        }
+        if HGETMSGHOOK.0 != ptr::null_mut() {
+            info!("Removing fallback WH_GETMESSAGE hook");
+            if let Err(e) = UnhookWindowsHookEx(HGETMSGHOOK) {
+                error!("Failed to remove WH_GETMESSAGE hook: {}", e);
+            }
+            HGETMSGHOOK = HHOOK(ptr::null_mut());
         }
         if let Err(e) = discord::stop_rpc() {
             error!("{}", e);
