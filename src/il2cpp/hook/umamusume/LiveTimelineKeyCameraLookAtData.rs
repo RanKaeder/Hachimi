@@ -1,7 +1,7 @@
 use crate::{
-    core::free_camera::{self, CameraScene, FreeCameraMode},
+    windows::free_camera::{self, CameraScene, FreeCameraMode},
     il2cpp::{
-        symbols::{get_class, get_method_addr},
+        symbols::get_method_addr,
         types::*,
     },
 };
@@ -33,6 +33,20 @@ extern "C" fn GetCharacterWorldPos(
 ) -> *mut Vector3_t {
     free_camera::set_live_active();
     LiveTimelineControl::set_current(timeline_control);
+
+    if free_camera::is_live_secondary_camera_update() {
+        return get_orig_fn!(GetCharacterWorldPos, GetCharacterWorldPosFn)(
+            ret,
+            timeline_control,
+            pos_flag,
+            chara_parts,
+            chara_pos,
+            offset,
+            is_attached_to_props,
+            props_index,
+            props_attach_node_index,
+        );
+    }
 
     let is_selfie_stick = free_camera::is_scene_enabled(CameraScene::Live)
         && free_camera::mode() == FreeCameraMode::SelfieStick;
@@ -77,13 +91,8 @@ extern "C" fn GetCharacterWorldPos(
 }
 
 pub fn init(umamusume: *const Il2CppImage) {
-    if let Ok(camera_lookat_data) = get_class(
-        umamusume,
-        c"Gallop.Live.Cutt",
-        c"LiveTimelineKeyCameraLookAtData",
-    ) {
-        let GetCharacterWorldPos_addr =
-            get_method_addr(camera_lookat_data, c"GetCharacterWorldPos", 8);
-        new_hook!(GetCharacterWorldPos_addr, GetCharacterWorldPos);
-    }
+    get_class_or_return!(umamusume, "Gallop.Live.Cutt", LiveTimelineKeyCameraLookAtData);
+
+    let GetCharacterWorldPos_addr = get_method_addr(LiveTimelineKeyCameraLookAtData, c"GetCharacterWorldPos", 8);
+    new_hook!(GetCharacterWorldPos_addr, GetCharacterWorldPos);
 }

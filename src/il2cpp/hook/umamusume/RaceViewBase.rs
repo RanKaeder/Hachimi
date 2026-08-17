@@ -1,38 +1,27 @@
-use std::ptr::null_mut;
-
 use crate::{
-    core::free_camera::{self, CameraScene},
+    windows::free_camera::{self, CameraScene},
     il2cpp::{
         ext::StringExt,
         hook::UnityEngine_CoreModule::Transform,
-        symbols::{get_class, get_method_addr},
+        symbols::get_method_addr,
         types::*,
     },
 };
+use once_cell::sync::Lazy;
 
-use super::{RaceModelController, free_camera as free_camera_hooks};
+use super::{RaceModelController};
 
-static RACE_DISABLED_HEADS: free_camera_hooks::DisabledHeadStore =
-    once_cell::sync::Lazy::new(free_camera_hooks::new_disabled_head_store);
+static RACE_DISABLED_HEADS: free_camera::DisabledHeadStore = Lazy::new(free_camera::new_disabled_head_store);
 
 static mut GET_MODEL_CONTROLLER_ADDR: usize = 0;
+impl_addr_wrapper_fn!(GetModelController, GET_MODEL_CONTROLLER_ADDR, *mut Il2CppObject, this: *mut Il2CppObject, index: i32);
 
-pub fn GetModelController(this: *mut Il2CppObject, index: i32) -> *mut Il2CppObject {
-    if unsafe { GET_MODEL_CONTROLLER_ADDR } == 0 {
-        return null_mut();
-    }
-    let func: extern "C" fn(*mut Il2CppObject, i32) -> *mut Il2CppObject =
-        unsafe { std::mem::transmute(GET_MODEL_CONTROLLER_ADDR) };
-    func(this, index)
+pub fn restore_race_disabled_heads(current_index: i32, force_all: bool) {
+    free_camera::restore_disabled_heads(&RACE_DISABLED_HEADS, current_index, force_all);
 }
 
-pub(crate) fn restore_race_disabled_heads(current_index: i32, force_all: bool) {
-    free_camera_hooks::restore_disabled_heads(&RACE_DISABLED_HEADS, current_index, force_all);
-}
-
-type NoArgsFn = extern "C" fn(this: *mut Il2CppObject);
-
-extern "C" fn RaceViewBase_LateUpdateView(this: *mut Il2CppObject) {
+type LateUpdateViewFn = extern "C" fn(this: *mut Il2CppObject);
+extern "C" fn LateUpdateView(this: *mut Il2CppObject) {
     let first_person = free_camera::is_race_first_person();
     let head_selfie = free_camera::is_race_head_selfie();
     if first_person || head_selfie {
@@ -61,7 +50,7 @@ extern "C" fn RaceViewBase_LateUpdateView(this: *mut Il2CppObject) {
                 let rot = free_camera::slerp_quaternion(rot_left, rot_right, 0.5);
                 if first_person {
                     free_camera::update_first_person(CameraScene::Race, pos, rot, None);
-                    free_camera_hooks::hide_head_parts(&RACE_DISABLED_HEADS, model_controller, index);
+                    free_camera::hide_head_parts(&RACE_DISABLED_HEADS, model_controller, index);
                     restore_race_disabled_heads(index, false);
                 }
                 else {
@@ -75,16 +64,16 @@ extern "C" fn RaceViewBase_LateUpdateView(this: *mut Il2CppObject) {
         restore_race_disabled_heads(0, true);
     }
 
-    get_orig_fn!(RaceViewBase_LateUpdateView, NoArgsFn)(this);
+    get_orig_fn!(LateUpdateView, LateUpdateViewFn)(this);
 }
 
 pub fn init(umamusume: *const Il2CppImage) {
-    if let Ok(race_view_base) = get_class(umamusume, c"Gallop", c"RaceViewBase") {
-        unsafe {
-            GET_MODEL_CONTROLLER_ADDR =
-                get_method_addr(race_view_base, c"GetModelController", 1);
-        }
-        let RaceViewBase_LateUpdateView_addr = get_method_addr(race_view_base, c"LateUpdateView", 0);
-        new_hook!(RaceViewBase_LateUpdateView_addr, RaceViewBase_LateUpdateView);
+    get_class_or_return!(umamusume, "Gallop", RaceViewBase);
+
+    let LateUpdateView_addr = get_method_addr(RaceViewBase, c"LateUpdateView", 0);
+    new_hook!(LateUpdateView_addr, LateUpdateView);
+
+    unsafe {
+        GET_MODEL_CONTROLLER_ADDR = get_method_addr(RaceViewBase, c"GetModelController", 1);
     }
 }

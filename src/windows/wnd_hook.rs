@@ -20,20 +20,23 @@ use windows::{core::{w, HSTRING}, Win32::{
     }
 }};
 
-use crate::{core::{free_camera, game::Region, gui, Gui, Hachimi}, il2cpp::{hook::{umamusume, UnityEngine_CoreModule}, symbols::{create_delegate, get_assembly_image, get_class, get_method_addr, Thread}, types::{Il2CppDelegate, RefreshRate}}, windows::utils};
+use crate::{core::{game::Region, gui, Gui, Hachimi}, il2cpp::{hook::{umamusume, UnityEngine_CoreModule}, symbols::{create_delegate, get_assembly_image, get_class, get_method_addr, Thread}, types::{Il2CppDelegate, RefreshRate}}, windows::utils};
 
-use super::{gui_impl::input, discord, smtc, taskbar};
+use super::{free_camera, gui_impl::input, discord, smtc, taskbar, webview};
 
 static TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
 static ALT_ENTER_PRESSED: AtomicBool = AtomicBool::new(false);
 static WNDPROC_ORIG: AtomicIsize = AtomicIsize::new(0);
 static GAME_WNDPROC_ORIG: AtomicIsize = AtomicIsize::new(0);
 static RESTORING_WNDPROC: AtomicBool = AtomicBool::new(false);
+static WNDPROC_INLINE_HOOKED: AtomicBool = AtomicBool::new(false);
 static RESIZE_WAIT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static RESIZE_WAIT_FRAMES: AtomicI32 = AtomicI32::new(0);
 static RESIZE_GENERATION: AtomicU32 = AtomicU32::new(0);
 static RESIZE_WAIT_FOR_END_FRAME_ADDR: AtomicUsize = AtomicUsize::new(0);
 static FREEFORM_LANDSCAPE_CLOSE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static SET_WINDOW_LONG_PTR_W_HOOK_ID: AtomicBool = AtomicBool::new(false);
+static SET_WINDOW_LONG_PTR_A_HOOK_ID: AtomicBool = AtomicBool::new(true);
 
 pub fn get_target_hwnd() -> HWND {
     HWND(TARGET_HWND.load(atomic::Ordering::Relaxed) as *mut _)
@@ -92,44 +95,45 @@ pub fn apply_freeform_window_style() {
     }
 }
 
-fn refresh_freeform_window() {
-    let hwnd = get_target_hwnd();
-    let mut client_rect = RECT::default();
-    if unsafe { GetClientRect(hwnd, &mut client_rect) }.is_err() {
-        return;
+fn restore_freeform_window_defaults() {
+    Thread::main_thread().schedule(|| {
+        umamusume::StandaloneWindowResize::set_is_prevent_reshape(false);
+        umamusume::StandaloneWindowResize::set_is_window_dragging(false);
+        umamusume::StandaloneWindowResize::set_is_window_size_changing(false);
+        umamusume::StandaloneWindowResize::finish_window_update();
+        umamusume::UIManager::apply_ui_scale();
+
+        let hwnd = get_target_hwnd();
+        unsafe {
+            let _ = RedrawWindow(
+                Some(hwnd),
+                None,
+                None,
+                RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
+            );
+        }
+    });
+}
+
+fn disable_freeform_window() -> bool {
+    let hachimi = Hachimi::instance();
+    let config = hachimi.config.load();
+    if !config.windows.freeform_window {
+        return false;
     }
 
-    let width = client_rect.right - client_rect.left;
-    let height = client_rect.bottom - client_rect.top;
-    if width <= 0 || height <= 0 {
-        return;
+    let mut new_config = config.as_ref().clone();
+    drop(config); 
+    
+    new_config.windows.freeform_window = false;
+
+    if let Err(e) = hachimi.save_and_reload_config(new_config.clone()) {
+        error!("Failed to save disabled freeform window config: {}", e);
+        hachimi.config.store(Arc::new(new_config));
     }
 
-    let mut window_rect = RECT::default();
-    let (window_width, window_height) = if unsafe { GetWindowRect(hwnd, &mut window_rect) }.is_ok() {
-        (window_rect.right - window_rect.left, window_rect.bottom - window_rect.top)
-    }
-    else {
-        (width, height)
-    };
-
-    umamusume::StandaloneWindowResize::update_window_state(
-        width,
-        height,
-        window_width,
-        window_height
-    );
-    umamusume::UIManager::refresh_after_window_resize(width, height);
-    umamusume::StandaloneWindowResize::finish_window_update();
-    apply_freeform_window_style();
-    unsafe {
-        let _ = RedrawWindow(
-            Some(hwnd),
-            None,
-            None,
-            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
-        );
-    }
+    restore_freeform_window_defaults();
+    true
 }
 
 fn wait_for_resize_end_frame(callback: fn()) -> bool {
@@ -161,7 +165,31 @@ fn resize_end_frame_tick() {
         return;
     }
 
-    refresh_freeform_window();
+    let hwnd = get_target_hwnd();
+    let mut client_rect = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client_rect) }.is_ok() {
+        let width = client_rect.right - client_rect.left;
+        let height = client_rect.bottom - client_rect.top;
+        if width > 0 && height > 0 {
+            let mut window_rect = RECT::default();
+            let (ww, wh) = if unsafe { GetWindowRect(hwnd, &mut window_rect) }.is_ok() {
+                (window_rect.right - window_rect.left, window_rect.bottom - window_rect.top)
+            } else {
+                (width, height)
+            };
+
+            umamusume::StandaloneWindowResize::update_window_state(width, height, ww, wh);
+            umamusume::UIManager::refresh_after_window_resize(width, height);
+            umamusume::StandaloneWindowResize::finish_window_update();
+            apply_freeform_window_style();
+            unsafe {
+                let _ = RedrawWindow(
+                    Some(hwnd), None, None,
+                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
+                );
+            }
+        }
+    }
 
     if generation != RESIZE_GENERATION.load(atomic::Ordering::Acquire) {
         RESIZE_WAIT_FRAMES.store(2, atomic::Ordering::Release);
@@ -173,8 +201,7 @@ fn resize_end_frame_tick() {
 
     RESIZE_WAIT_ACTIVE.store(false, atomic::Ordering::Release);
     if generation != RESIZE_GENERATION.load(atomic::Ordering::Acquire) &&
-        !RESIZE_WAIT_ACTIVE.swap(true, atomic::Ordering::AcqRel)
-    {
+        !RESIZE_WAIT_ACTIVE.swap(true, atomic::Ordering::AcqRel) {
         RESIZE_WAIT_FRAMES.store(2, atomic::Ordering::Release);
         if !wait_for_resize_end_frame(resize_end_frame_tick) {
             Thread::main_thread().schedule(resize_end_frame_tick);
@@ -207,76 +234,13 @@ fn queue_current_client_resize(hwnd: HWND) {
     }
 }
 
-fn is_freeform_window_supported() -> bool {
-    Hachimi::instance().game.region != Region::Global
-}
-
-fn apply_freeform_window_disabled() {
-    Thread::main_thread().schedule(|| {
-        umamusume::StandaloneWindowResize::set_is_prevent_reshape(false);
-        umamusume::StandaloneWindowResize::set_is_window_dragging(false);
-        umamusume::StandaloneWindowResize::set_is_window_size_changing(false);
-        umamusume::StandaloneWindowResize::finish_window_update();
-        umamusume::UIManager::apply_ui_scale();
-
-        let hwnd = get_target_hwnd();
-        unsafe {
-            let _ = RedrawWindow(
-                Some(hwnd),
-                None,
-                None,
-                RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
-            );
-        }
-    });
-}
-
-fn disable_freeform_window_config() -> bool {
-    let hachimi = Hachimi::instance();
-    let config = hachimi.config.load();
-    if !config.windows.freeform_window {
-        return false;
-    }
-
-    let mut new_config = config.as_ref().clone();
-    drop(config);
-    new_config.windows.freeform_window = false;
-
-    if let Err(e) = hachimi.save_and_reload_config(new_config.clone()) {
-        error!("Failed to save disabled freeform window config: {}", e);
-        hachimi.config.store(Arc::new(new_config));
-    }
-
-    true
-}
-
-fn disable_freeform_window() -> bool {
-    if !disable_freeform_window_config() {
-        return false;
-    }
-
-    apply_freeform_window_disabled();
-    true
-}
-
-pub fn disable_freeform_window_if_unsupported() -> bool {
-    if is_freeform_window_supported() {
-        return false;
-    }
-
-    disable_freeform_window()
-}
-
 pub fn close_freeform_window_for_landscape() -> bool {
-    if disable_freeform_window_if_unsupported() {
-        return true;
-    }
-
-    if !umamusume::Screen::is_landscape_mode() {
+    if !Hachimi::instance().config.load().windows.freeform_window {
         return false;
     }
 
-    if !Hachimi::instance().config.load().windows.freeform_window {
+    // 2. Safe to call IL2CPP methods.
+    if !umamusume::Screen::get_IsLandscapeMode() {
         return false;
     }
 
@@ -294,21 +258,19 @@ pub fn close_freeform_window_for_landscape() -> bool {
 }
 
 pub fn apply_freeform_window_config() {
-    if disable_freeform_window_if_unsupported() {
-        return;
-    }
+    Thread::main_thread().schedule(|| {
+        if close_freeform_window_for_landscape() {
+            return;
+        }
 
-    if close_freeform_window_for_landscape() {
-        return;
-    }
+        if !Hachimi::instance().config.load().windows.freeform_window {
+            restore_freeform_window_defaults();
+            return;
+        }
 
-    if !Hachimi::instance().config.load().windows.freeform_window {
-        apply_freeform_window_disabled();
-        return;
-    }
-
-    apply_freeform_window_style();
-    queue_current_client_resize(get_target_hwnd());
+        apply_freeform_window_style();
+        queue_current_client_resize(get_target_hwnd());
+    });
 }
 
 fn toggle_freeform_full_screen() {
@@ -333,19 +295,18 @@ fn toggle_freeform_full_screen() {
 }
 
 type SetWindowLongPtrFn = unsafe extern "system" fn(HWND, WINDOW_LONG_PTR_INDEX, isize) -> isize;
-
 unsafe extern "system" fn set_window_long_ptr_w_hook(
     hwnd: HWND,
     index: WINDOW_LONG_PTR_INDEX,
     new_long: isize
 ) -> isize {
+    std::hint::black_box(SET_WINDOW_LONG_PTR_W_HOOK_ID.load(atomic::Ordering::Relaxed));
     let orig_fn = get_orig_fn!(set_window_long_ptr_w_hook, SetWindowLongPtrFn);
     let target_hwnd = get_target_hwnd();
 
     if hwnd.0 == target_hwnd.0 &&
         index == GWLP_WNDPROC &&
-        !RESTORING_WNDPROC.load(atomic::Ordering::Acquire)
-    {
+        !RESTORING_WNDPROC.load(atomic::Ordering::Acquire) {
         if new_long != 0 && new_long != wnd_proc as *const () as isize {
             return GAME_WNDPROC_ORIG.swap(new_long, atomic::Ordering::AcqRel);
         }
@@ -355,8 +316,7 @@ unsafe extern "system" fn set_window_long_ptr_w_hook(
     let mut new_long = new_long;
     if hwnd.0 == target_hwnd.0 &&
         index == GWL_STYLE &&
-        Hachimi::instance().config.load().windows.freeform_window
-    {
+        Hachimi::instance().config.load().windows.freeform_window {
         new_long |= WS_MAXIMIZEBOX.0 as isize;
     }
 
@@ -368,6 +328,7 @@ unsafe extern "system" fn set_window_long_ptr_a_hook(
     index: WINDOW_LONG_PTR_INDEX,
     new_long: isize
 ) -> isize {
+    std::hint::black_box(SET_WINDOW_LONG_PTR_A_HOOK_ID.load(atomic::Ordering::Relaxed));
     let orig_fn = get_orig_fn!(set_window_long_ptr_a_hook, SetWindowLongPtrFn);
     let target_hwnd = get_target_hwnd();
 
@@ -393,6 +354,10 @@ unsafe extern "system" fn set_window_long_ptr_a_hook(
 }
 
 fn restore_original_wnd_proc(hwnd: HWND) {
+    if WNDPROC_INLINE_HOOKED.load(atomic::Ordering::Acquire) {
+        return;
+    }
+
     let freeform_orig = WNDPROC_ORIG.swap(0, atomic::Ordering::AcqRel);
     let game_orig = GAME_WNDPROC_ORIG.swap(0, atomic::Ordering::AcqRel);
     let orig = if game_orig != 0 { game_orig } else { freeform_orig };
@@ -409,7 +374,9 @@ fn restore_original_wnd_proc(hwnd: HWND) {
 
 extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let freeform_window = Hachimi::instance().config.load().windows.freeform_window;
-    let orig_addr = if freeform_window {
+    let inline_hooked = WNDPROC_INLINE_HOOKED.load(atomic::Ordering::Acquire);
+
+    let orig_addr = if inline_hooked || freeform_window {
         WNDPROC_ORIG.load(atomic::Ordering::Acquire)
     }
     else {
@@ -421,62 +388,60 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
         return unsafe { DefWindowProcW(hwnd, umsg, wparam, lparam) };
     };
 
-    if freeform_window {
-        if umsg == WM_SYSKEYDOWN &&
-            wparam.0 == VK_RETURN.0 as usize &&
-            lparam.0 & (1 << 29) != 0
-        {
-            if !ALT_ENTER_PRESSED.swap(true, atomic::Ordering::AcqRel) {
-                Thread::main_thread().schedule(toggle_freeform_full_screen);
+    if Hachimi::instance().game.region != Region::Global {
+        if freeform_window {
+            if umsg == WM_SYSKEYDOWN &&
+                wparam.0 == VK_RETURN.0 as usize &&
+                lparam.0 & (1 << 29) != 0 {
+                if !ALT_ENTER_PRESSED.swap(true, atomic::Ordering::AcqRel) {
+                    Thread::main_thread().schedule(toggle_freeform_full_screen);
+                }
+                return LRESULT(0);
             }
-            return LRESULT(0);
-        }
 
-        if umsg == WM_SYSKEYUP && wparam.0 == VK_RETURN.0 as usize {
-            ALT_ENTER_PRESSED.store(false, atomic::Ordering::Release);
-            return LRESULT(0);
-        }
+            if umsg == WM_SYSKEYUP && wparam.0 == VK_RETURN.0 as usize {
+                ALT_ENTER_PRESSED.store(false, atomic::Ordering::Release);
+                return LRESULT(0);
+            }
 
-        if umsg == WM_SIZING {
-            // Keep the proposed RECT untouched. The game's original WndProc
-            // rewrites it here to enforce its portrait/landscape aspect ratio.
-            return LRESULT(1);
-        }
-        else if umsg == WM_ENTERSIZEMOVE {
-            umamusume::StandaloneWindowResize::set_is_window_size_changing(true);
-        }
-        else if umsg == WM_MOVING {
-            umamusume::StandaloneWindowResize::set_is_window_dragging(true);
-        }
-        else if umsg == WM_EXITSIZEMOVE {
-            let res = unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
-            umamusume::StandaloneWindowResize::set_is_window_dragging(false);
-            umamusume::StandaloneWindowResize::set_is_window_size_changing(false);
-            queue_current_client_resize(hwnd);
-            return res;
-        }
-        else if umsg == WM_SIZE {
-            let res = unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
-            if wparam.0 != SIZE_MINIMIZED as usize {
-                let width = (lparam.0 & 0xFFFF) as u16 as i32;
-                let height = ((lparam.0 >> 16) & 0xFFFF) as u16 as i32;
-                queue_freeform_resize(width, height);
+            if umsg == WM_SIZING {
+                // Keep the proposed RECT untouched. The game's original WndProc
+                // rewrites it here to enforce its portrait/landscape aspect ratio.
+                return LRESULT(1);
+            } else if umsg == WM_ENTERSIZEMOVE {
+                umamusume::StandaloneWindowResize::set_is_window_size_changing(true);
+            } else if umsg == WM_MOVING {
+                umamusume::StandaloneWindowResize::set_is_window_dragging(true);
+            } else if umsg == WM_EXITSIZEMOVE {
+                let res = unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
+                umamusume::StandaloneWindowResize::set_is_window_dragging(false);
+                umamusume::StandaloneWindowResize::set_is_window_size_changing(false);
+                queue_current_client_resize(hwnd);
+                return res;
+            } else if umsg == WM_SIZE {
+                let res = unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
+                if wparam.0 != SIZE_MINIMIZED as usize {
+                    let width = (lparam.0 & 0xFFFF) as u16 as i32;
+                    let height = ((lparam.0 >> 16) & 0xFFFF) as u16 as i32;
+                    queue_freeform_resize(width, height);
 
-                if wparam.0 == SIZE_MAXIMIZED as usize {
-                    unsafe {
-                        let _ = RedrawWindow(
-                            Some(hwnd),
-                            None,
-                            None,
-                            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
-                        );
+                    if wparam.0 == SIZE_MAXIMIZED as usize {
+                        unsafe {
+                            let _ = RedrawWindow(
+                                Some(hwnd),
+                                None,
+                                None,
+                                RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
+                            );
+                        }
                     }
                 }
+                return res;
             }
-            return res;
         }
     }
 
+    webview::process_message(umsg, lparam);
     match umsg {
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let current_key = wparam.0 as u16;
@@ -528,7 +493,7 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
         WM_RBUTTONDOWN => {
             if !Gui::is_gui_input_active_atomic() {
                 free_camera::on_mouse_button(true);
-                if free_camera::is_enabled() {
+                if free_camera::is_game_input_capture_active() {
                     return LRESULT(0);
                 }
             }
@@ -536,7 +501,7 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
         WM_RBUTTONUP => {
             if !Gui::is_gui_input_active_atomic() {
                 free_camera::on_mouse_button(false);
-                if free_camera::is_enabled() {
+                if free_camera::is_game_input_capture_active() {
                     return LRESULT(0);
                 }
             }
@@ -555,13 +520,13 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
             if !Gui::is_gui_input_active_atomic() {
                 let delta = (wparam.0 >> 16) as u16 as i16;
                 free_camera::on_mouse_wheel(delta);
-                if free_camera::is_enabled() {
+                if free_camera::is_game_input_capture_active() {
                     return LRESULT(0);
                 }
             }
         },
         WM_INPUT => {
-            if !Gui::is_gui_input_active_atomic() && free_camera::is_enabled() {
+            if !Gui::is_gui_input_active_atomic() && free_camera::is_game_input_capture_active() {
                 return LRESULT(0);
             }
         },
@@ -670,7 +635,9 @@ pub fn init() {
             // lmao
             w!("UmamusumePrettyDerby_Jpn")
         }
-        else {
+        else if game.region == Region::Taiwan {
+            w!("賽馬娘Pretty Derby")
+        } else {
             // global technically has "Umamusume" as its title but this api
             // is case insensitive so it works. why am i surprised
             w!("umamusume")
@@ -688,7 +655,6 @@ pub fn init() {
         }
 
         taskbar::init(hwnd);
-        free_camera::init_windows_gamepad_capture();
 
         if let Ok(umamusume) = get_assembly_image(c"umamusume.dll") {
             if let Ok(mono_behaviour_extension) =
@@ -705,39 +671,58 @@ pub fn init() {
         let wnd_proc_orig = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wnd_proc as *const () as isize);
         if wnd_proc_orig == 0 {
             error!("Failed to subclass game window");
-        }
-        else {
+        } else {
             WNDPROC_ORIG.store(wnd_proc_orig, atomic::Ordering::Release);
             GAME_WNDPROC_ORIG.store(wnd_proc_orig, atomic::Ordering::Release);
 
-            if let Ok(user32) = GetModuleHandleW(w!("user32.dll")) {
-                let set_window_long_ptr_w_addr = utils::get_proc_address(user32, c"SetWindowLongPtrW");
-                let set_window_long_ptr_a_addr = utils::get_proc_address(user32, c"SetWindowLongPtrA");
-
-                info!("Hooking SetWindowLongPtrW");
-                if set_window_long_ptr_w_addr == 0 {
-                    error!("Failed to find SetWindowLongPtrW");
-                }
-                else if let Err(e) = hachimi.interceptor.hook(
-                    set_window_long_ptr_w_addr,
-                    set_window_long_ptr_w_hook as *const () as _
-                ) {
-                    error!("Failed to hook SetWindowLongPtrW: {}", e);
-                }
-
-                info!("Hooking SetWindowLongPtrA");
-                if set_window_long_ptr_a_addr == 0 {
-                    error!("Failed to find SetWindowLongPtrA");
-                }
-                else if let Err(e) = hachimi.interceptor.hook(
-                    set_window_long_ptr_a_addr,
-                    set_window_long_ptr_a_hook as *const () as _
-                ) {
-                    error!("Failed to hook SetWindowLongPtrA: {}", e);
+            let actual_wndproc = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+            if actual_wndproc != 0 && actual_wndproc != wnd_proc as *const () as isize {
+                info!("SetWindowLongPtrW was swallowed, falling back to inline WndProc hook");
+                match hachimi.interceptor.hook(
+                    actual_wndproc as usize,
+                    wnd_proc as *const () as _) {
+                    Ok(_) => {
+                        let trampoline = hachimi.interceptor.get_trampoline_addr(
+                            wnd_proc as *const () as usize
+                        );
+                        WNDPROC_ORIG.store(trampoline as isize, atomic::Ordering::Release);
+                        GAME_WNDPROC_ORIG.store(trampoline as isize, atomic::Ordering::Release);
+                        WNDPROC_INLINE_HOOKED.store(true, atomic::Ordering::Release);
+                    }
+                    Err(e) => {
+                        error!("Failed to inline-hook window procedure: {}", e);
+                    }
                 }
             }
-            else {
-                error!("Failed to get user32.dll module handle");
+
+            if Hachimi::instance().game.region != Region::Global {
+                if let Ok(user32) = GetModuleHandleW(w!("user32.dll")) {
+                    let set_window_long_ptr_w_addr = utils::get_proc_address(user32, c"SetWindowLongPtrW");
+                    let set_window_long_ptr_a_addr = utils::get_proc_address(user32, c"SetWindowLongPtrA");
+
+                    info!("Hooking SetWindowLongPtrW");
+                    if set_window_long_ptr_w_addr == 0 {
+                        error!("Failed to find SetWindowLongPtrW");
+                    }
+                    else if let Err(e) = hachimi.interceptor.hook(
+                        set_window_long_ptr_w_addr,
+                        set_window_long_ptr_w_hook as *const () as _
+                    ) {
+                        error!("Failed to hook SetWindowLongPtrW: {}", e);
+                    }
+
+                    info!("Hooking SetWindowLongPtrA");
+                    if set_window_long_ptr_a_addr == 0 {
+                        error!("Failed to find SetWindowLongPtrA");
+                    } else if let Err(e) = hachimi.interceptor.hook(
+                        set_window_long_ptr_a_addr,
+                        set_window_long_ptr_a_hook as *const () as _
+                    ) {
+                        error!("Failed to hook SetWindowLongPtrA: {}", e);
+                    }
+                } else {
+                    error!("Failed to get user32.dll module handle");
+                }
             }
         }
 
@@ -751,12 +736,14 @@ pub fn init() {
             _ = utils::set_window_topmost(hwnd, true);
         }
 
-        apply_freeform_window_config();
+        if Hachimi::instance().game.region != Region::Global {
+            apply_freeform_window_config();
+        }
 
         if hachimi.discord_rpc.load(atomic::Ordering::Relaxed) {
             if let Err(e) = discord::start_rpc() {
-                 error!("{}", e);
-             }
+                error!("{}", e);
+            }
         }
 
         smtc::init(hwnd);
@@ -766,7 +753,6 @@ pub fn init() {
 pub fn uninit() {
     unsafe {
         restore_original_wnd_proc(get_target_hwnd());
-        free_camera::uninit_windows_gamepad_capture();
         Hachimi::instance().interceptor.unhook(set_window_long_ptr_w_hook as *const () as _);
         Hachimi::instance().interceptor.unhook(set_window_long_ptr_a_hook as *const () as _);
 

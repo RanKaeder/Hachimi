@@ -1,4 +1,4 @@
-use std::{collections::{HashSet, VecDeque}, env, fs, io::Write, path::Path, sync::{Mutex, RwLock}, time::Duration};
+use std::{collections::{HashSet, VecDeque}, env, fs, io::Write, path::Path, sync::{Mutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Duration};
 
 use chrono::Local;
 use crate::core::{game::Region, Hachimi, utils::get_masterdb_path};
@@ -38,6 +38,7 @@ const POST_URL_QUEUE_CAPACITY: usize = 64;
 // exact - it can't be confused by concurrent/out-of-order requests the way a FIFO queue could.
 static PENDING_REQUESTS: Lazy<Mutex<VecDeque<(usize, Vec<u8>)>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
 const PENDING_REQUEST_CAPACITY: usize = 64;
+static POST_HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 static UNLOCK_CHARA_IDS: Lazy<RwLock<Option<Vec<i32>>>> = Lazy::new(|| RwLock::new(None));
 static UNLOCK_DRESS_IDS: Lazy<RwLock<Option<Vec<i32>>>> = Lazy::new(|| RwLock::new(None));
 static UNLOCK_CARD_ROWS: Lazy<RwLock<Option<Vec<(i32, i32)>>>> = Lazy::new(|| RwLock::new(None));
@@ -1373,8 +1374,17 @@ fn make_byte_array(bytes: &[u8]) -> Option<*mut Il2CppArray> {
 extern "C" fn CompressRequest(data: *mut Il2CppArray) -> *mut Il2CppArray {
     let body = unsafe { Array::<u8>::from(data).as_slice().to_vec() };
     let compressed = get_orig_fn!(CompressRequest, CompressRequestFn)(data);
-    // Park the body until Post supplies the URL; matched by the compressed array's identity.
-    queue_pending_request(compressed as usize, body);
+
+    // If Post hook isn't available on this game build, fall back to direct forwarding so
+    // request packet relay still works after merges/game updates.
+    if POST_HOOK_ACTIVE.load(Ordering::Relaxed) {
+        // Park the body until Post supplies the URL; matched by the compressed array's identity.
+        queue_pending_request(compressed as usize, body);
+    }
+    else if let Err(e) = post_with_url(REQUEST.as_str(), None, &body) {
+        warn!("notifier: failed to forward request to '{}': {}", REQUEST.as_str(), e);
+    }
+
     compressed
 }
 extern "C" fn DecompressResponse(data: *mut Il2CppArray) -> *mut Il2CppArray {
@@ -1413,11 +1423,40 @@ pub fn init(img: *const Il2CppImage) {
         }
     }
 
-    if let Ok(cute_http_img) = get_assembly_image(c"Cute.Http.Assembly.dll") {
-        if let Ok(www_request) = get_class(cute_http_img, c"Cute.Http", c"WWWRequest") {
-            let POST_ADDR = get_method_addr(www_request, c"Post", 3);
-            new_hook!(POST_ADDR, Post);
+    for (assembly_name, namespace) in [
+        (c"Cute.Http.Assembly.dll", c"Cute.Http"),
+        (c"Cute.Core.Assembly.dll", c"Cute.Http"),
+        (c"Cute.Core.Assembly.dll", c"Cute.Core"),
+    ] {
+        let Ok(cute_http_img) = get_assembly_image(assembly_name) else {
+            continue;
+        };
+        let Ok(www_request) = get_class(cute_http_img, namespace, c"WWWRequest") else {
+            continue;
+        };
+
+        for arg_count in [3, 4, 2] {
+            let POST_ADDR = get_method_addr(www_request, c"Post", arg_count);
+            if POST_ADDR != 0 {
+                info!(
+                    "Hooking WWWRequest.Post from {:?} / {:?} with arg_count={}",
+                    assembly_name,
+                    namespace,
+                    arg_count
+                );
+                new_hook!(POST_ADDR, Post);
+                POST_HOOK_ACTIVE.store(true, Ordering::Relaxed);
+                break;
+            }
         }
+
+        if POST_HOOK_ACTIVE.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+
+    if !POST_HOOK_ACTIVE.load(Ordering::Relaxed) {
+        warn!("WWWRequest.Post hook not found; request forwarding will use no-URL fallback");
     }
 
     let COMPRESSREQUEST_ADDR = get_method_addr(HttpHelper, c"CompressRequest", 1);

@@ -87,6 +87,8 @@ pub struct Config {
     pub taskbar_show_progress_on_download: bool,
     #[serde(default)]
     pub taskbar_show_progress_on_connecting: bool,
+    #[serde(default)]
+    pub taskbar_show_progress_on_schedule_book: bool,
     #[serde(default = "Config::default_true")]
     pub enable_smtc: bool,
     #[serde(default = "Config::default_true")]
@@ -97,6 +99,10 @@ pub struct Config {
     pub gui_landscape_ratio: f32,
     #[serde(default)]
     pub custom_title_name: Option<String>,
+    #[serde(default)]
+    pub ingame_webview: bool,
+    #[serde(default)]
+    pub free_camera: super::free_camera::FreeCameraConfig,
 }
 
 impl Config {

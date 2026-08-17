@@ -264,13 +264,19 @@ impl Hachimi {
             config.localized_data_dir.as_ref().map(|p| self.game.data_dir.join(p))
         });
 
-        let new_data = match LocalizedData::new(&self.config.load(), ld_path) {
+        let mut new_data = match LocalizedData::new(&self.config.load(), ld_path) {
             Ok(v) => v,
             Err(e) => {
                 error!("Failed to load localized data: {}", e);
                 return;
             }
         };
+
+        if self.game.region == Region::Global {
+            for id in 55..=66 {
+                new_data.localize_dict.remove(&format!("Common{id:04}"));
+            }
+        }
         
         self.localized_data.store(Arc::new(new_data));
         
@@ -740,8 +746,6 @@ pub struct Config {
     #[serde(default)]
     pub force_allow_dynamic_camera: bool,
     #[serde(default)]
-    pub free_camera: crate::core::free_camera::FreeCameraConfig,
-    #[serde(default)]
     pub live_theater_allow_same_chara: bool,
     #[serde(default)]
     pub unlock_live_chara: bool,
@@ -750,7 +754,7 @@ pub struct Config {
     #[serde(default)]
     pub skill_info_dialog: bool,
     #[serde(default)]
-    pub homescreen_bgseason: crate::il2cpp::hook::umamusume::TimeUtil::BgSeason,
+    pub homescreen_bgseason: crate::il2cpp::hook::umamusume::GameDefine::BgSeason,
     pub sugoi_url: Option<String>,
     #[serde(default)]
     pub auto_translate_stories: bool,
@@ -773,6 +777,8 @@ pub struct Config {
     pub cyspring_mono_uncap_frame_scale: bool,
     #[serde(default = "Config::default_ui_animation_scale")]
     pub ui_animation_scale: f32,
+    #[serde(default)]
+    pub trainer_live_landscape: bool,
     #[serde(default)]
     pub live_slider_always_show: bool,
     #[serde(default)]
@@ -897,7 +903,10 @@ pub enum Language {
     BPortuguese,
 
     #[serde(rename = "fil")]
-    Filipino
+    Filipino,
+
+    #[serde(rename = "ru")]
+    Russian
 }
 
 impl Default for Language {
@@ -917,6 +926,8 @@ impl Default for Language {
             Self::BPortuguese
         } else if locale.starts_with("fil") {
             Self::Filipino
+        } else if locale.starts_with("ru") {
+            Self::Russian
         } else {
             Self::English
         }
@@ -932,7 +943,8 @@ impl Language {
         Self::Indonesian.choice(),
         Self::Spanish.choice(),
         Self::BPortuguese.choice(),
-        Self::Filipino.choice()
+        Self::Filipino.choice(),
+        Self::Russian.choice()
     ];
 
     pub fn set_locale(&self) {
@@ -948,7 +960,8 @@ impl Language {
             Language::Indonesian => "id",
             Language::Spanish => "es",
             Language::BPortuguese => "pt-br",
-            Language::Filipino => "fil"
+            Language::Filipino => "fil",
+            Language::Russian => "ru"
         }
     }
 
@@ -961,7 +974,8 @@ impl Language {
             Language::Indonesian => "Bahasa Indonesia",
             Language::Spanish => "Español (ES)",
             Language::BPortuguese => "Português (Brasil)",
-            Language::Filipino => "Filipino"
+            Language::Filipino => "Filipino",
+            Language::Russian => "Русский"
         }
     }
 
@@ -1141,7 +1155,8 @@ impl LocalizedData {
     }
 
     pub fn load_custom_story_ruby(&self, ast_ruby_name: &str) -> Option<Vec<CustomRubyBlock>> {
-        let filename = ast_ruby_name.split('/').last().unwrap_or(ast_ruby_name);
+        // let filename = ast_ruby_name.split('/').last().unwrap_or(ast_ruby_name);
+        let filename = ast_ruby_name.split('/').next_back().unwrap_or(ast_ruby_name);
 
         let filename_no_ext = filename.strip_suffix(".asset").unwrap_or(filename);
 

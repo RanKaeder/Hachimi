@@ -18,7 +18,7 @@ use chrono::{Utc, Datelike};
 use crate::il2cpp::{
     ext::StringExt,
     hook::{
-        umamusume::{CameraData::ShadowResolution, CySpringController::SpringUpdateMode, Director, GameSystem, GraphicSettings::{GraphicsQuality, MsaaQuality}, Localize, TimeUtil::BgSeason, SceneManager as UmaSceneManager},
+        umamusume::{CameraData::ShadowResolution, CySpringController::SpringUpdateMode, Director, GameSystem, GraphicSettings::{GraphicsQuality, MsaaQuality}, Localize, GameDefine::BgSeason, SceneManager as UmaSceneManager},
         UnityEngine_CoreModule::{Application, Texture::AnisoLevel}
     },
     symbols::Thread
@@ -29,20 +29,21 @@ use crate::il2cpp::{
     ext::Il2CppStringExt,
     hook::{umamusume::WebViewManager, UnityEngine_CoreModule::{TouchScreenKeyboard, TouchScreenKeyboardType}},
     symbols::GCHandle,
-    types::{Il2CppObject, Il2CppString, RangeInt}
+    types::*
 };
 
 #[cfg(target_os = "windows")]
 use crate::il2cpp::hook::UnityEngine_CoreModule::QualitySettings;
+#[cfg(target_os = "windows")]
+use crate::windows::free_camera::{self, FreeCameraMode};
 
 use super::{
-    free_camera::{self, FreeCameraMode},
     game::Region,
     hachimi::{self, Language, REPO_PATH, WEBSITE_URL},
     http::{ureq_config, AsyncRequest},
     live_utils,
     tl_repo::{self, RepoInfo, LocalRepoInfo},
-    utils::{self, get_localized_string, SendPtr},
+    utils::{self, get_localized_string, umamusume_enum_options, SendPtr},
     Hachimi
 };
 
@@ -563,7 +564,7 @@ impl Gui {
         visuals.extreme_bg_color = config.ui_extreme_bg_color;
         visuals.window_corner_radius = config.ui_window_rounding.into();
 
-        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, config.ui_text_color);
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, config.ui_text_color);
 
         visuals.widgets.active.bg_fill = config.ui_accent_color;
         visuals.widgets.hovered.bg_fill = config.ui_accent_color.linear_multiply(0.8);
@@ -928,6 +929,7 @@ impl Gui {
         self.process_plugin_windows();
         self.run_windows();
         self.run_notifications();
+        #[cfg(target_os = "windows")]
         self.run_free_camera_overlay();
 
         if self.splash_visible { self.run_splash(); }
@@ -1021,15 +1023,33 @@ impl Gui {
         self.run_live_slider(&ctx);
 
         let has_interactive_widgets = IS_LIVE_SCENE.load(atomic::Ordering::Relaxed);
+        #[cfg(target_os = "windows")]
         let free_camera_input_capture = free_camera::wants_windows_input_capture();
 
         // Store these as atomic values so the input thread can check them without locking the gui
-        GUI_INPUT_ACTIVE.store(self.is_consuming_input(), atomic::Ordering::Release);
+        #[cfg(target_os = "android")]
         IS_CONSUMING_INPUT.store(
-            self.is_consuming_input() || has_interactive_widgets || free_camera_input_capture,
+            self.is_consuming_input() || has_interactive_widgets,
+            atomic::Ordering::Release
+        );
+        #[cfg(target_os = "windows")]
+        {
+            GUI_INPUT_ACTIVE.store(self.menu_visible || !self.windows.is_empty(), atomic::Ordering::Release);
+            IS_CONSUMING_INPUT.store(
+                self.is_consuming_input() || has_interactive_widgets || free_camera_input_capture,
+                atomic::Ordering::Release
+            );
+        }
+
+        #[cfg(target_os = "android")]
+        WANTS_INPUT.store(
+            self.context.wants_pointer_input() || 
+            self.context.is_pointer_over_area() || 
+            self.context.wants_keyboard_input(),
             atomic::Ordering::Release
         );
 
+        #[cfg(target_os = "windows")]
         WANTS_INPUT.store(
             self.context.wants_pointer_input() || 
             self.context.is_pointer_over_area() || 
@@ -1666,6 +1686,7 @@ impl Gui {
         self.notifications.retain_mut(|n| n.run(&self.context, &mut offset));
     }
 
+    #[cfg(target_os = "windows")]
     fn run_free_camera_overlay(&mut self) {
         let Some((content, alpha)) = free_camera::overlay_message() else {
             return;
@@ -1696,10 +1717,19 @@ impl Gui {
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.splash_visible && !self.menu_visible && !self.update_progress_visible &&
-        self.notifications.is_empty() && self.windows.is_empty() &&
-        !IS_LIVE_SCENE.load(atomic::Ordering::Acquire) &&
-        !free_camera::has_overlay_message()
+        #[cfg(target_os = "windows")]
+        {
+            !self.splash_visible && !self.menu_visible && !self.update_progress_visible &&
+            self.notifications.is_empty() && self.windows.is_empty() &&
+            !IS_LIVE_SCENE.load(atomic::Ordering::Acquire) &&
+            !free_camera::has_overlay_message()
+        }
+        #[cfg(target_os = "android")]
+        {
+            !self.splash_visible && !self.menu_visible && !self.update_progress_visible &&
+            self.notifications.is_empty() && self.windows.is_empty() &&
+            !IS_LIVE_SCENE.load(atomic::Ordering::Acquire)
+        }
     }
 
     pub fn is_consuming_input(&self) -> bool {
@@ -1711,7 +1741,7 @@ impl Gui {
     }
 
     pub fn is_gui_input_active_atomic() -> bool {
-        GUI_INPUT_ACTIVE.load(atomic::Ordering::Relaxed)
+        GUI_INPUT_ACTIVE.load(atomic::Ordering::Acquire)
     }
 
     pub fn set_consuming_input(&mut self, val: bool) {
@@ -1720,7 +1750,6 @@ impl Gui {
         }
 
         self.menu_visible = val;
-        GUI_INPUT_ACTIVE.store(val, atomic::Ordering::Release);
         IS_CONSUMING_INPUT.store(val, atomic::Ordering::Release);
     }
 
@@ -2273,32 +2302,7 @@ struct ConfigEditor {
     font_color_options: Vec<String>,
     outline_size_options: Vec<String>,
     outline_color_options: Vec<String>,
-}
-
-fn get_enum_options(class_name: &std::ffi::CStr) -> Vec<String> {
-    use crate::il2cpp::{api::*, symbols::get_assembly_image, symbols::get_class};
-    let mut options = Vec::new();
-    let Ok(image) = get_assembly_image(c"umamusume.dll") else { return options };
-    let Ok(klass) = get_class(image, c"Gallop", class_name) else { return options };
-
-    if !il2cpp_class_is_enum(klass) { return options; }
-
-    let mut iter: *mut std::ffi::c_void = std::ptr::null_mut();
-    loop {
-        let field = il2cpp_class_get_fields(klass, &mut iter);
-        if field.is_null() { break; }
-        let attrs = il2cpp_field_get_flags(field);
-        if (attrs & 0x0040) != 0 {
-            let name_ptr = il2cpp_field_get_name(field);
-            if !name_ptr.is_null() {
-                let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
-                if let Ok(s) = name.to_str() {
-                    options.push(s.to_string());
-                }
-            }
-        }
-    }
-    options
+    bgseason_options: Vec<(BgSeason, String)>,
 }
 
 #[derive(Eq, PartialEq, Clone, Copy)]
@@ -2325,6 +2329,18 @@ fn should_show_option(search: &str, label: &str) -> bool {
 impl ConfigEditor {
     pub fn new() -> ConfigEditor {
         let handle = Hachimi::instance().config.load();
+
+        let default_label = t!("default").to_string();
+        // Season text ids from TextId enum
+        let bgseason_options: Vec<(BgSeason, String)> = vec![
+            (BgSeason::None, default_label),
+            (BgSeason::Spring, get_localized_string("Common0108")),
+            (BgSeason::Summer, get_localized_string("Common0109")),
+            (BgSeason::Fall, get_localized_string("Common0110")),
+            (BgSeason::Winter, get_localized_string("Common0111")),
+            (BgSeason::CherryBlossom, get_localized_string("Common0112"))
+        ];
+
         ConfigEditor {
             last_ptr_config: Arc::as_ptr(&handle) as usize,
             config: (**Hachimi::instance().config.load()).clone(),
@@ -2333,9 +2349,10 @@ impl ConfigEditor {
             search_term: String::new(),
             champions_resources: crate::il2cpp::sql::get_champions_resources(),
             champions_live_max_year: crate::il2cpp::sql::get_champions_live_max_year(),
-            font_color_options: get_enum_options(c"FontColorType"),
-            outline_size_options: get_enum_options(c"OutlineSizeType"),
-            outline_color_options: get_enum_options(c"OutlineColorType"),
+            font_color_options: umamusume_enum_options(c"FontColorType"),
+            outline_size_options: umamusume_enum_options(c"OutlineSizeType"),
+            outline_color_options: umamusume_enum_options(c"OutlineColorType"),
+            bgseason_options
         }
     }
 
@@ -2674,6 +2691,23 @@ impl ConfigEditor {
                     ui.checkbox(&mut config.windows.taskbar_show_progress_on_connecting, "");
                     ui.end_row();
                 }
+
+                if should_show_option(search, &t!("config_editor.taskbar_show_progress_on_schedule_book")) {
+                    ui.label(t!("config_editor.taskbar_show_progress_on_schedule_book"));
+                    ui.checkbox(&mut config.windows.taskbar_show_progress_on_schedule_book, "");
+                    ui.end_row();
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                if Hachimi::instance().game.region == Region::Japan
+                    && crate::windows::webview::has_available_webview()
+                    && should_show_option(search,&t!("config_editor.ingame_webview")) {
+                    ui.label(t!("config_editor.ingame_webview"));
+                    ui.checkbox(&mut config.windows.ingame_webview, "");
+                    ui.end_row();
+                }
             }
         }
         // General tab end
@@ -2696,6 +2730,29 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            #[cfg(target_os = "android")]
+            {
+                if should_show_option(search, &t!("config_editor.recommended_ui_scale"))
+                    && config.android.force_orientation_mode == ScreenOrientation_LandscapeLeft {
+                    ui.label("");
+                    if ui.button(t!("config_editor.recommended_ui_scale")).clicked() {
+                        config.ui_scale = 0.6;
+                        request_notification(NotificationRequest::Custom(t!("notification.recommended_ui_scale_applied").to_string()));
+                    }
+                    ui.end_row();
+                }
+
+                if should_show_option(search, &t!("config_editor.force_orientation_mode")) {
+                    ui.label(t!("config_editor.force_orientation_mode"));
+                    Gui::run_combo(ui, "force_orientation_mode", &mut config.android.force_orientation_mode, &[
+                        (ScreenOrientation_Unknown, &t!("disabled")),
+                        (ScreenOrientation_LandscapeLeft, &t!("landscape")),
+                        (ScreenOrientation_Portrait, &t!("portrait")),
+                    ]);
+                    ui.end_row();
+                }
+            }
+
             if should_show_option(search, &t!("config_editor.ui_animation_scale")) {
                 ui.label(t!("config_editor.ui_animation_scale"));
                 ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
@@ -2711,7 +2768,7 @@ impl ConfigEditor {
             if should_show_option(search, &t!("config_editor.msaa")) {
                 ui.label(t!("config_editor.msaa"));
                 Gui::run_combo(ui, "msaa", &mut config.msaa, &[
-                    (MsaaQuality:: Disabled, &t!("default")),
+                    (MsaaQuality::Disabled, &t!("default")),
                     (MsaaQuality::_2x, "2x"),
                     (MsaaQuality::_4x, "4x"),
                     (MsaaQuality::_8x, "8x")
@@ -2879,30 +2936,37 @@ impl ConfigEditor {
 
             #[cfg(target_os = "windows")]
             {
-                if should_show_option(search, &t!("config_editor.free_camera")) {
+                if should_show_option(search, &t!("config_editor.free_camera")) && Hachimi::instance().game.region != Region::Global {
                     ui.label(t!("config_editor.free_camera"));
-                    let was_enabled = config.free_camera.enabled;
-                    if ui.checkbox(&mut config.free_camera.enabled, "").changed() &&
-                        !was_enabled &&
-                        config.free_camera.enabled
-                    {
-                        thread::spawn(|| {
-                            Gui::instance().unwrap()
-                                .lock().unwrap()
-                                .show_notification(&t!("notification.free_camera_input_disabled"));
-                        });
-                    }
+                    ui.checkbox(&mut config.windows.free_camera.enabled, "");
                     ui.end_row();
 
-                    ui.label("");
-                    if ui.button(t!("config_editor.free_camera_settings")).clicked() {
-                        thread::spawn(|| {
-                            Gui::instance().unwrap()
-                            .lock().unwrap()
-                            .show_window(Box::new(FreeCameraSettingsWindow::new()));
-                        });
+                    if config.windows.free_camera.enabled {
+                        ui.label("");
+                        if ui.button(t!("free_camera.settings_title")).clicked() {
+                            thread::spawn(|| {
+                                Gui::instance().unwrap()
+                                .lock().unwrap()
+                                .show_window(Box::new(FreeCameraSettingsWindow::new()));
+                            });
+                        }
+                        ui.end_row();
+
+                        ui.label("");
+                        if ui.button(t!("free_camera.cheatsheet_title")).clicked() {
+                            thread::spawn(move || {
+                                Gui::instance().unwrap()
+                                .lock().unwrap()
+                                .show_window(Box::new(SimpleMarkdownDialog::new_with_height(
+                                    &t!("free_camera.cheatsheet_title"),
+                                    &t!("free_camera.cheatsheet_contents"),
+                                    400.0,
+                                    500.0
+                                )));
+                            });
+                        }
+                        ui.end_row();
                     }
-                    ui.end_row();
                 }
             }
 
@@ -2912,6 +2976,12 @@ impl ConfigEditor {
                 ui.end_row();
                 ui.label(t!("config_editor.unlock_live_chara"));
                 ui.checkbox(&mut config.unlock_live_chara, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.trainer_live_landscape")) {
+                ui.label(t!("config_editor.trainer_live_landscape"));
+                ui.checkbox(&mut config.trainer_live_landscape, "");
                 ui.end_row();
             }
 
@@ -2929,7 +2999,7 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
-            if should_show_option(search, &t!("config_editor.skill_info_dialog")) {
+            if should_show_option(search, &t!("config_editor.skill_info_dialog")) && Hachimi::instance().game.region != Region::Global {
                 ui.label(t!("config_editor.skill_info_dialog"));
                 ui.checkbox(&mut config.skill_info_dialog, "");
                 ui.end_row();
@@ -2937,25 +3007,9 @@ impl ConfigEditor {
 
             if should_show_option(search, &t!("config_editor.homescreen_bgseason")) {
                 ui.label(t!("config_editor.homescreen_bgseason"));
-                // Season text from TextId enum
-                let default_label = t!("default");
-                let spring = get_localized_string("Common0108");
-                let summer = get_localized_string("Common0109");
-                let fall = get_localized_string("Common0110");
-                let winter = get_localized_string("Common0111");
-                let cherry = get_localized_string("Common0112");
-
-                let mut seasons: Vec<(BgSeason, &str)> = vec![
-                    (BgSeason::None, &default_label),
-                    (BgSeason::Spring, spring.as_str())
-                ];
-                if Hachimi::instance().game.region == Region::Japan {
-                    seasons.push((BgSeason::Summer, summer.as_str()));
-                    seasons.push((BgSeason::Fall, fall.as_str()));
-                    seasons.push((BgSeason::Winter, winter.as_str()));
-                    seasons.push((BgSeason::CherryBlossom, cherry.as_str()));
-                }
-                Gui::run_combo(ui, "homescreen_bgseason", &mut config.homescreen_bgseason, &seasons);
+                let season_opts: Vec<(BgSeason, &str)> = self.bgseason_options.iter()
+                    .map(|(s, l)| (*s, l.as_str())).collect();
+                Gui::run_combo(ui, "homescreen_bgseason", &mut config.homescreen_bgseason, &season_opts);
                 ui.end_row();
             }
 
@@ -2997,6 +3051,37 @@ impl ConfigEditor {
 
                 ui.label(t!("config_editor.export_circle_fan_counts"));
                 ui.checkbox(&mut config.export_circle_fan_counts, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.hide_ingame_ui_hotkey_bind")) && config.hide_ingame_ui_hotkey {
+                ui.label(t!("config_editor.hide_ingame_ui_hotkey_bind"));
+                ui.horizontal(|ui| {
+                    #[cfg(target_os = "windows")]
+                    ui.label(crate::windows::utils::vk_to_display_label(config.windows.hide_ingame_ui_hotkey_bind));
+                    #[cfg(target_os = "android")]
+                    ui.label(crate::android::gui_impl::keymap::keycode_display_label(config.android.hide_ingame_ui_hotkey_bind));
+
+                    if ui.button(t!("bind_key")).clicked() {
+                        std::thread::spawn(|| {
+                            let Some(gui_mutex) = Gui::instance() else { return };
+                            let mut gui = gui_mutex.lock().unwrap();
+                            gui.show_window(Box::new(SetKeybindWindow::new(|result| {
+                                let Some(raw) = result else { return };
+
+                                let hachimi = Hachimi::instance();
+                                let mut new_config = hachimi.config.load().as_ref().clone();
+
+                                #[cfg(target_os = "windows")]
+                                { new_config.windows.hide_ingame_ui_hotkey_bind = raw; }
+                                #[cfg(target_os = "android")]
+                                { new_config.android.hide_ingame_ui_hotkey_bind = raw; }
+
+                                save_and_reload_config(new_config);
+                            })));
+                        });
+                    }
+                });
                 ui.end_row();
             }
 
@@ -3105,37 +3190,6 @@ impl ConfigEditor {
                         });
                     ui.end_row();
                 }
-            }
-
-            if should_show_option(search, &t!("config_editor.hide_ingame_ui_hotkey_bind")) {
-                ui.label(t!("config_editor.hide_ingame_ui_hotkey_bind"));
-                ui.horizontal(|ui| {
-                    #[cfg(target_os = "windows")]
-                    ui.label(crate::windows::utils::vk_to_display_label(config.windows.hide_ingame_ui_hotkey_bind));
-                    #[cfg(target_os = "android")]
-                    ui.label(crate::android::gui_impl::keymap::keycode_display_label(config.android.hide_ingame_ui_hotkey_bind));
-
-                    if ui.button(t!("bind_key")).clicked() {
-                        std::thread::spawn(|| {
-                            let Some(gui_mutex) = Gui::instance() else { return };
-                            let mut gui = gui_mutex.lock().unwrap();
-                            gui.show_window(Box::new(SetKeybindWindow::new(|result| {
-                                let Some(raw) = result else { return };
-
-                                let hachimi = Hachimi::instance();
-                                let mut new_config = hachimi.config.load().as_ref().clone();
-
-                                #[cfg(target_os = "windows")]
-                                { new_config.windows.hide_ingame_ui_hotkey_bind = raw; }
-                                #[cfg(target_os = "android")]
-                                { new_config.android.hide_ingame_ui_hotkey_bind = raw; }
-
-                                save_and_reload_config(new_config);
-                            })));
-                        });
-                    }
-                });
-                ui.end_row();
             }
         }
         // Gameplay tab end
@@ -3313,9 +3367,12 @@ fn save_and_reload_config(config: hachimi::Config) {
     let notif = match Hachimi::instance().save_and_reload_config(config) {
         Ok(_) => {
             #[cfg(target_os = "windows")]
-            crate::windows::wnd_hook::apply_freeform_window_config();
-            free_camera::reload_runtime_config();
-
+            {
+                if Hachimi::instance().game.region != Region::Global {
+                    crate::windows::wnd_hook::apply_freeform_window_config();
+                    free_camera::reload_runtime_config();
+                }
+            }
             t!("notification.config_saved").into_owned()
         },
         Err(e) => e.to_string()
@@ -3636,11 +3693,13 @@ impl Window for LiveVocalsSwapWindow {
     }
 }
 
+#[cfg(target_os = "windows")]
 struct FreeCameraSettingsWindow {
     id: egui::Id,
     config: hachimi::Config,
 }
 
+#[cfg(target_os = "windows")]
 impl FreeCameraSettingsWindow {
     fn new() -> FreeCameraSettingsWindow {
         FreeCameraSettingsWindow {
@@ -3649,7 +3708,6 @@ impl FreeCameraSettingsWindow {
         }
     }
 
-    #[cfg(target_os = "windows")]
     fn keybind_row(
         ui: &mut egui::Ui,
         label: Cow<'static, str>,
@@ -3666,7 +3724,6 @@ impl FreeCameraSettingsWindow {
         ui.end_row();
     }
 
-    #[cfg(target_os = "windows")]
     fn open_keybind_window(setter: fn(&mut free_camera::FreeCameraKeybinds, u16)) {
         thread::spawn(move || {
             let Some(gui_mutex) = Gui::instance() else { return };
@@ -3676,13 +3733,14 @@ impl FreeCameraSettingsWindow {
 
                 let hachimi = Hachimi::instance();
                 let mut new_config = hachimi.config.load().as_ref().clone();
-                setter(&mut new_config.free_camera.keybinds, raw);
+                setter(&mut new_config.windows.free_camera.keybinds, raw);
                 save_and_reload_config(new_config);
             })));
         });
     }
 }
 
+#[cfg(target_os = "windows")]
 impl Window for FreeCameraSettingsWindow {
     fn run(&mut self, ctx: &egui::Context) -> bool {
         let scale = get_scale(ctx);
@@ -3691,11 +3749,8 @@ impl Window for FreeCameraSettingsWindow {
         let mut save_clicked = false;
         let mut reset_clicked = false;
 
-        #[cfg(target_os = "windows")]
-        {
-            self.config.free_camera.keybinds =
-                Hachimi::instance().config.load().free_camera.keybinds.clone();
-        }
+        self.config.windows.free_camera.keybinds =
+            Hachimi::instance().config.load().windows.free_camera.keybinds.clone();
 
         let mode_free = t!("free_camera.mode_free");
         let mode_first_person = t!("free_camera.mode_first_person");
@@ -3716,35 +3771,33 @@ impl Window for FreeCameraSettingsWindow {
             .map(|(i, (name, _))| (i as i32, *name))
             .collect();
 
-        new_window(ctx, self.id, t!("free_camera.title"))
+        new_window(ctx, self.id, t!("free_camera.settings_title"))
         .default_width(340.0 * scale)
         .max_width(360.0 * scale)
         .max_height(430.0 * scale)
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.set_width(ui.available_width());
+            simple_window_layout(ui, self.id, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
                 egui::ScrollArea::vertical()
                     .id_salt(self.id.with("free_camera_settings_scroll"))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
                         egui::Frame::NONE
-                        .inner_margin(egui::Margin::symmetric(4, 0))
+                        .inner_margin(egui::Margin::symmetric(8, 0))
                         .show(ui, |ui| {
                             egui::Grid::new(self.id.with("free_camera_settings_grid"))
                             .striped(true)
                             .num_columns(2)
-                            .spacing([12.0 * scale, 4.0 * scale])
+                            .spacing([40.0 * scale, 4.0 * scale])
                             .show(ui, |ui| {
-                                let cfg = &mut self.config.free_camera;
+                                let cfg = &mut self.config.windows.free_camera;
 
-                                ui.strong(t!("free_camera.section_general"));
-                                ui.label("");
-                                ui.end_row();
-
-                                ui.label(t!("config_editor.free_camera"));
-                                ui.checkbox(&mut cfg.enabled, "");
+                                ui.vertical(|ui| {
+                                    ui.heading(t!("free_camera.section_general"));
+                                    ui.separator();
+                                });
                                 ui.end_row();
 
                                 ui.label(t!("free_camera.remove_camera_effects"));
@@ -3775,12 +3828,9 @@ impl Window for FreeCameraSettingsWindow {
                                 ui.add(egui::DragValue::new(&mut cfg.look_step).speed(0.05).range(0.001..=30.0));
                                 ui.end_row();
 
-                                #[cfg(target_os = "windows")]
-                                {
-                                    ui.label(t!("free_camera.mouse_speed"));
-                                    ui.add(egui::DragValue::new(&mut cfg.mouse_speed).speed(1.0).range(1.0..=1000.0));
-                                    ui.end_row();
-                                }
+                                ui.label(t!("free_camera.mouse_speed"));
+                                ui.add(egui::DragValue::new(&mut cfg.mouse_speed).speed(1.0).range(1.0..=1000.0));
+                                ui.end_row();
 
                                 ui.label(t!("free_camera.live_fov"));
                                 ui.add(egui::DragValue::new(&mut cfg.live_fov).speed(0.5).range(1.0..=120.0));
@@ -3802,8 +3852,15 @@ impl Window for FreeCameraSettingsWindow {
                                 ui.add(egui::DragValue::new(&mut cfg.gamepad_look_speed).speed(0.05).range(0.1..=10.0));
                                 ui.end_row();
 
-                                ui.strong(t!("free_camera.section_live"));
-                                ui.label("");
+                                ui.vertical(|ui| {
+                                    ui.add_space(8.0 * scale);
+                                    ui.heading(t!("free_camera.section_live"));
+                                    ui.separator();
+                                });
+                                ui.end_row();
+
+                                ui.label(t!("free_camera.live_remove_screen_effects"));
+                                ui.checkbox(&mut cfg.live_remove_screen_effects, "");
                                 ui.end_row();
 
                                 ui.label(t!("free_camera.live_disable_character_teleport"));
@@ -3842,83 +3899,89 @@ impl Window for FreeCameraSettingsWindow {
                                 ui.add(egui::DragValue::new(&mut cfg.live_follow_smooth_lookat_step).speed(0.01).range(0.02..=1.0));
                                 ui.end_row();
 
-                                ui.strong(t!("free_camera.section_race"));
-                                ui.label("");
+                                ui.vertical(|ui| {
+                                    ui.add_space(8.0 * scale);
+                                    ui.heading(t!("free_camera.section_race"));
+                                    ui.separator();
+                                });
                                 ui.end_row();
 
                                 ui.label(t!("free_camera.race_target_index"));
                                 ui.add(egui::DragValue::new(&mut cfg.race_target_index).speed(1.0).range(-1..=17));
                                 ui.end_row();
 
-                                #[cfg(target_os = "windows")]
-                                {
-                                    ui.strong(t!("free_camera.section_keybinds"));
-                                    ui.label("");
-                                    ui.end_row();
+                                ui.vertical(|ui| {
+                                    ui.add_space(8.0 * scale);
+                                    ui.heading(t!("free_camera.section_keybinds"));
+                                    ui.separator();
+                                });
+                                ui.end_row();
 
-                                    macro_rules! keybind_row {
-                                        ($field:ident, $key:literal) => {{
-                                            let setter: fn(&mut free_camera::FreeCameraKeybinds, u16) =
-                                                |keybinds, raw| keybinds.$field = raw;
-                                            Self::keybind_row(
-                                                ui,
-                                                t!($key),
-                                                cfg.keybinds.$field,
-                                                setter,
-                                            );
-                                        }};
-                                    }
-
-                                    keybind_row!(move_forward, "free_camera.key_move_forward");
-                                    keybind_row!(move_back, "free_camera.key_move_back");
-                                    keybind_row!(move_left, "free_camera.key_move_left");
-                                    keybind_row!(move_right, "free_camera.key_move_right");
-                                    keybind_row!(move_down, "free_camera.key_move_down");
-                                    keybind_row!(move_up, "free_camera.key_move_up");
-                                    keybind_row!(look_up, "free_camera.key_look_up");
-                                    keybind_row!(look_down, "free_camera.key_look_down");
-                                    keybind_row!(look_left, "free_camera.key_look_left");
-                                    keybind_row!(look_right, "free_camera.key_look_right");
-                                    keybind_row!(fov_increase, "free_camera.key_fov_increase");
-                                    keybind_row!(fov_decrease, "free_camera.key_fov_decrease");
-                                    keybind_row!(follow_offset_up, "free_camera.key_follow_offset_up");
-                                    keybind_row!(follow_offset_down, "free_camera.key_follow_offset_down");
-                                    keybind_row!(follow_offset_left, "free_camera.key_follow_offset_left");
-                                    keybind_row!(follow_offset_right, "free_camera.key_follow_offset_right");
-                                    keybind_row!(target_previous, "free_camera.key_target_previous");
-                                    keybind_row!(target_next, "free_camera.key_target_next");
-                                    keybind_row!(part_previous, "free_camera.key_part_previous");
-                                    keybind_row!(part_next, "free_camera.key_part_next");
-                                    keybind_row!(reset, "free_camera.key_reset");
-                                    keybind_row!(cycle_mode, "free_camera.key_cycle_mode");
-                                    keybind_row!(reverse, "free_camera.key_reverse");
+                                macro_rules! keybind_row {
+                                    ($field:ident, $key:literal) => {{
+                                        let setter: fn(&mut free_camera::FreeCameraKeybinds, u16) =
+                                            |keybinds, raw| keybinds.$field = raw;
+                                        Self::keybind_row(
+                                            ui,
+                                            t!($key),
+                                            cfg.keybinds.$field,
+                                            setter,
+                                        );
+                                    }};
                                 }
+
+                                keybind_row!(move_forward, "free_camera.key_move_forward");
+                                keybind_row!(move_back, "free_camera.key_move_back");
+                                keybind_row!(move_left, "free_camera.key_move_left");
+                                keybind_row!(move_right, "free_camera.key_move_right");
+                                keybind_row!(move_down, "free_camera.key_move_down");
+                                keybind_row!(move_up, "free_camera.key_move_up");
+                                keybind_row!(look_up, "free_camera.key_look_up");
+                                keybind_row!(look_down, "free_camera.key_look_down");
+                                keybind_row!(look_left, "free_camera.key_look_left");
+                                keybind_row!(look_right, "free_camera.key_look_right");
+                                keybind_row!(fov_increase, "free_camera.key_fov_increase");
+                                keybind_row!(fov_decrease, "free_camera.key_fov_decrease");
+                                keybind_row!(follow_offset_up, "free_camera.key_follow_offset_up");
+                                keybind_row!(follow_offset_down, "free_camera.key_follow_offset_down");
+                                keybind_row!(follow_offset_left, "free_camera.key_follow_offset_left");
+                                keybind_row!(follow_offset_right, "free_camera.key_follow_offset_right");
+                                keybind_row!(target_previous, "free_camera.key_target_previous");
+                                keybind_row!(target_next, "free_camera.key_target_next");
+                                keybind_row!(part_previous, "free_camera.key_part_previous");
+                                keybind_row!(part_next, "free_camera.key_part_next");
+                                keybind_row!(reset, "free_camera.key_reset");
+                                keybind_row!(cycle_mode, "free_camera.key_cycle_mode");
+                                keybind_row!(reverse, "free_camera.key_reverse");
+
+                                ui.horizontal(|ui| ui.add_space(130.0 * scale));
+                                ui.horizontal(|ui| ui.add_space(130.0 * scale));
+                                ui.end_row();
                             });
                         });
                     });
-
-                ui.separator();
-
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                    if ui.button(t!("config_editor.restore_defaults")).clicked() {
-                        reset_clicked = true;
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if ui.button(t!("cancel")).clicked() {
-                            open2 = false;
+                }, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                        if ui.button(t!("config_editor.restore_defaults")).clicked() {
+                            reset_clicked = true;
                         }
-                        if ui.button(t!("save")).clicked() {
-                            save_clicked = true;
-                            open2 = false;
-                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if ui.button(t!("cancel")).clicked() {
+                                open2 = false;
+                            }
+                            if ui.button(t!("save")).clicked() {
+                                save_clicked = true;
+                                open2 = false;
+                            }
+                        });
                     });
                 });
-            });
-        });
+            }
+        );
 
         if reset_clicked {
-            self.config.free_camera = free_camera::FreeCameraConfig::default();
+            self.config.windows.free_camera = free_camera::FreeCameraConfig::default();
         }
 
         if save_clicked {
@@ -5368,6 +5431,8 @@ pub struct SimpleMarkdownDialog {
     content: String,
     id: egui::Id,
     cache: egui_commonmark::CommonMarkCache,
+    default_height: Option<f32>,
+    max_height: Option<f32>,
 }
 
 impl SimpleMarkdownDialog {
@@ -5377,6 +5442,19 @@ impl SimpleMarkdownDialog {
             content: content.to_owned(),
             id: random_id(),
             cache: egui_commonmark::CommonMarkCache::default(),
+            default_height: None,
+            max_height: None,
+        }
+    }
+
+    pub fn new_with_height(title: &str, content: &str, default_height: f32, max_height: f32) -> SimpleMarkdownDialog {
+        SimpleMarkdownDialog {
+            title: title.to_owned(),
+            content: content.to_owned(),
+            id: random_id(),
+            cache: egui_commonmark::CommonMarkCache::default(),
+            default_height: Some(default_height),
+            max_height: Some(max_height),
         }
     }
 }
@@ -5386,7 +5464,17 @@ impl Window for SimpleMarkdownDialog {
         let mut open = true;
         let mut open2 = true;
 
-        new_window(ctx, self.id, &self.title)
+        let scale = get_scale(ctx);
+
+        let mut window = new_window(ctx, self.id, &self.title);
+        if let Some(h) = self.default_height {
+            window = window.default_height(h * scale);
+        }
+        if let Some(h) = self.max_height {
+            window = window.max_height(h * scale);
+        }
+
+        window
         .open(&mut open)
         .show(ctx, |ui| {
             egui::TopBottomPanel::bottom(self.id.with("bottom_panel"))
