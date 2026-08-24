@@ -9,7 +9,8 @@ use crate::il2cpp::symbols::{get_assembly_image, get_class, get_method_addr, Arr
 use crate::il2cpp::types::{Il2CppArray, Il2CppImage, Il2CppObject, Il2CppString};
 use once_cell::sync::Lazy;
 use rusqlite::{Connection as RusqliteConnection, OpenFlags};
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use ureq;
 
 static TIMEOUT: Lazy<Duration> = Lazy::new(|| {
@@ -43,6 +44,9 @@ static UNLOCK_CHARA_IDS: Lazy<RwLock<Option<Vec<i32>>>> = Lazy::new(|| RwLock::n
 static UNLOCK_DRESS_IDS: Lazy<RwLock<Option<Vec<i32>>>> = Lazy::new(|| RwLock::new(None));
 static UNLOCK_CARD_ROWS: Lazy<RwLock<Option<Vec<(i32, i32)>>>> = Lazy::new(|| RwLock::new(None));
 static UNLOCK_DB_PATCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Guards the once-per-launch revert of previous sessions' unlock_live_chara DB mutations (see
+// revert_unlock_db_mutations); runs regardless of whether the feature is currently enabled.
+static UNLOCK_DB_MAINTAINED: AtomicBool = AtomicBool::new(false);
 const RACE_URL_KEYWORDS: [&str; 3] = ["race_start", "race_replay", "get_saved_race_result"];
 
 static mut BYTE_CLASS: *mut crate::il2cpp::types::Il2CppClass = 0 as _;
@@ -459,6 +463,135 @@ fn ensure_master_orig(master_path: &str) {
     }
 }
 
+/// Tracks exactly which `card_data`/`card_rarity_data` primary keys this fork's unlock_live_chara
+/// feature synthesized into master.mdb, persisted alongside the DB so a later session (even after
+/// the game has been updated) can find and revert them. See [`revert_unlock_db_mutations`].
+#[derive(Default, Serialize, Deserialize)]
+struct UnlockDbState {
+    #[serde(default)]
+    synthetic_card_ids: Vec<i32>,
+    #[serde(default)]
+    synthetic_rarity_ids: Vec<i32>,
+}
+
+fn unlock_state_path(db_path: &str) -> String {
+    format!("{}.hachimi_unlock_state.json", db_path)
+}
+
+fn load_unlock_state(db_path: &str) -> UnlockDbState {
+    fs::read_to_string(unlock_state_path(db_path))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_unlock_state(db_path: &str, state: &UnlockDbState) {
+    match serde_json::to_string(state) {
+        Ok(json) => {
+            if let Err(e) = fs::write(unlock_state_path(db_path), json) {
+                warn!("unlock_live_chara: failed to save unlock state for '{}': {}", db_path, e);
+            }
+        }
+        Err(e) => warn!("unlock_live_chara: failed to serialize unlock state for '{}': {}", db_path, e),
+    }
+}
+
+fn clear_unlock_state(db_path: &str) {
+    let _ = fs::remove_file(unlock_state_path(db_path));
+}
+
+/// Undoes this fork's own mutations from a previous session - forced-past dates/flags on
+/// dress/live/chara_data (restored from the `master_orig.mdb` pristine backup) and synthesized
+/// card_data/card_rarity_data rows (deleted via the ids recorded in [`UnlockDbState`]) - before
+/// anything touches master.mdb again this session.
+///
+/// Without this, synthesized rows permanently occupy id-space that a later official game update
+/// may need for those exact ids (its own INSERT then fails or is skipped, leaving master.mdb
+/// inconsistent with the update), and forced-past dates on brand new content stick around even
+/// after disabling the unlock option since disabling only stops *new* patching. Both were found to
+/// cause a "network connection error" dialog on the Live menu after a game update, previously only
+/// fixable by manually deleting master.mdb. Runs regardless of the current unlock_live_chara flag,
+/// via [`ensure_unlock_db_maintenance_once`].
+fn revert_unlock_db_mutations(db_path: &str) {
+    let state = load_unlock_state(db_path);
+    let orig_path = db_path.replace("/master.mdb", "/master_orig.mdb");
+    let has_backup = Path::new(&orig_path).exists();
+
+    if state.synthetic_card_ids.is_empty() && state.synthetic_rarity_ids.is_empty() && !has_backup {
+        return;
+    }
+
+    let Ok(conn) = RusqliteConnection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE) else {
+        return;
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(2));
+
+    if !state.synthetic_rarity_ids.is_empty() {
+        let ids = state.synthetic_rarity_ids.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+        if let Err(e) = conn.execute(&format!("DELETE FROM card_rarity_data WHERE id IN ({})", ids), []) {
+            warn!("unlock_live_chara: failed to revert synthesized card_rarity_data rows in '{}': {}", db_path, e);
+        }
+    }
+    if !state.synthetic_card_ids.is_empty() {
+        let ids = state.synthetic_card_ids.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+        if let Err(e) = conn.execute(&format!("DELETE FROM card_data WHERE id IN ({})", ids), []) {
+            warn!("unlock_live_chara: failed to revert synthesized card_data rows in '{}': {}", db_path, e);
+        }
+    }
+
+    if has_backup {
+        let escaped_orig = orig_path.replace('\'', "''");
+        if let Err(e) = conn.execute(&format!("ATTACH DATABASE '{}' AS hachimi_orig", escaped_orig), []) {
+            warn!("unlock_live_chara: failed to attach master_orig.mdb for revert: {}", e);
+        } else {
+            for sql in [
+                "UPDATE dress_data SET \
+                    use_live = (SELECT o.use_live FROM hachimi_orig.dress_data o WHERE o.id = dress_data.id), \
+                    use_live_theater = (SELECT o.use_live_theater FROM hachimi_orig.dress_data o WHERE o.id = dress_data.id), \
+                    start_time = (SELECT o.start_time FROM hachimi_orig.dress_data o WHERE o.id = dress_data.id), \
+                    general_purpose = (SELECT o.general_purpose FROM hachimi_orig.dress_data o WHERE o.id = dress_data.id), \
+                    costume_type = (SELECT o.costume_type FROM hachimi_orig.dress_data o WHERE o.id = dress_data.id), \
+                    body_type = (SELECT o.body_type FROM hachimi_orig.dress_data o WHERE o.id = dress_data.id) \
+                 WHERE id IN (SELECT id FROM hachimi_orig.dress_data)",
+                "UPDATE live_data SET \
+                    start_date = (SELECT o.start_date FROM hachimi_orig.live_data o WHERE o.id = live_data.id) \
+                 WHERE id IN (SELECT id FROM hachimi_orig.live_data)",
+                "UPDATE chara_data SET \
+                    start_date = (SELECT o.start_date FROM hachimi_orig.chara_data o WHERE o.id = chara_data.id), \
+                    shape = (SELECT o.shape FROM hachimi_orig.chara_data o WHERE o.id = chara_data.id) \
+                 WHERE id IN (SELECT id FROM hachimi_orig.chara_data)",
+            ] {
+                if let Err(e) = conn.execute(sql, []) {
+                    warn!("unlock_live_chara: revert-from-backup SQL failed on '{}': {}", db_path, e);
+                }
+            }
+            let _ = conn.execute("DETACH DATABASE hachimi_orig", []);
+        }
+    }
+
+    info!(
+        "unlock_live_chara: reverted previous session's mutations in '{}' (synthetic_card={}, synthetic_rarity={}, restored_from_backup={})",
+        db_path, state.synthetic_card_ids.len(), state.synthetic_rarity_ids.len(), has_backup
+    );
+
+    clear_unlock_state(db_path);
+}
+
+/// Runs [`revert_unlock_db_mutations`] once per process launch, on every candidate master.mdb,
+/// regardless of the unlock_live_chara config flag - see that function's docs for why this can't
+/// just be gated behind the flag like the rest of the feature.
+fn ensure_unlock_db_maintenance_once() {
+    if UNLOCK_DB_MAINTAINED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    for candidate in build_masterdb_write_candidates() {
+        if Path::new(&candidate).exists() {
+            revert_unlock_db_mutations(&candidate);
+        }
+    }
+}
+
 fn run_sql(conn: *mut Il2CppObject, sql: String) -> Option<i32> {
     let query = Connection::Query(conn, sql.to_il2cpp_string());
     if query.is_null() {
@@ -500,8 +633,9 @@ fn query_count(conn: *mut Il2CppObject, sql: &str) -> Option<i32> {
 /// ids that exist as 3D body model assets in the meta db but have no card entry yet, i.e. costumes
 /// that were never "released" as a selectable card by the server. Without a matching card_data row
 /// these dresses won't show up in selection screens (e.g. live theater costume picker) even though
-/// dress_data has an entry for them. Returns the number of dress ids patched this way.
-fn insert_missing_dress_cards_rusqlite(tx: &rusqlite::Transaction, is_kor: bool) -> i32 {
+/// dress_data has an entry for them. Returns the (card_data, card_rarity_data) ids inserted so the
+/// caller can persist them for [`revert_unlock_db_mutations`].
+fn insert_missing_dress_cards_rusqlite(tx: &rusqlite::Transaction, is_kor: bool) -> (Vec<i32>, Vec<i32>) {
     let mut existing_card_ids: HashSet<i32> = HashSet::new();
     if let Ok(mut stmt) = tx.prepare("SELECT id FROM card_data") {
         if let Ok(rows) = stmt.query_map([], |row| row.get::<_, i32>(0)) {
@@ -509,7 +643,8 @@ fn insert_missing_dress_cards_rusqlite(tx: &rusqlite::Transaction, is_kor: bool)
         }
     }
 
-    let mut inserted = 0;
+    let mut inserted_card_ids = Vec::new();
+    let mut inserted_rarity_ids = Vec::new();
     for dress_id in find_meta_dress_ids() {
         if existing_card_ids.contains(&dress_id) {
             continue;
@@ -529,21 +664,23 @@ fn insert_missing_dress_cards_rusqlite(tx: &rusqlite::Transaction, is_kor: bool)
             "INSERT INTO card_rarity_data VALUES({0}03, {0}, 3, {0}, 10010103, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 5, 7, 7, 1, 7, 7, 5, 7, 1, 101,{0})",
             dress_id
         );
-        let _ = tx.execute(&rarity_sql, []);
+        if tx.execute(&rarity_sql, []).is_ok() {
+            inserted_rarity_ids.push(dress_id * 100 + 3);
+        }
 
         existing_card_ids.insert(dress_id);
-        inserted += 1;
+        inserted_card_ids.push(dress_id);
     }
 
-    if inserted > 0 {
-        info!("unlock_live_chara: synthesized {} card_data row(s) for unreleased dresses", inserted);
+    if !inserted_card_ids.is_empty() {
+        info!("unlock_live_chara: synthesized {} card_data row(s) for unreleased dresses", inserted_card_ids.len());
     }
 
-    inserted
+    (inserted_card_ids, inserted_rarity_ids)
 }
 
 /// Same as [`insert_missing_dress_cards_rusqlite`] but for the LibNative connection fallback path.
-fn insert_missing_dress_cards_libnative(conn: *mut Il2CppObject, is_kor: bool) -> i32 {
+fn insert_missing_dress_cards_libnative(conn: *mut Il2CppObject, is_kor: bool) -> (Vec<i32>, Vec<i32>) {
     let mut existing_card_ids: HashSet<i32> = HashSet::new();
     let query = Connection::Query(conn, "SELECT id FROM card_data".to_il2cpp_string());
     if !query.is_null() {
@@ -553,7 +690,8 @@ fn insert_missing_dress_cards_libnative(conn: *mut Il2CppObject, is_kor: bool) -
         Query::Dispose(query);
     }
 
-    let mut inserted = 0;
+    let mut inserted_card_ids = Vec::new();
+    let mut inserted_rarity_ids = Vec::new();
     for dress_id in find_meta_dress_ids() {
         if existing_card_ids.contains(&dress_id) {
             continue;
@@ -573,17 +711,19 @@ fn insert_missing_dress_cards_libnative(conn: *mut Il2CppObject, is_kor: bool) -
             "INSERT INTO card_rarity_data VALUES({0}03, {0}, 3, {0}, 10010103, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 5, 7, 7, 1, 7, 7, 5, 7, 1, 101,{0})",
             dress_id
         );
-        let _ = run_sql(conn, rarity_sql);
+        if run_sql(conn, rarity_sql).is_some() {
+            inserted_rarity_ids.push(dress_id * 100 + 3);
+        }
 
         existing_card_ids.insert(dress_id);
-        inserted += 1;
+        inserted_card_ids.push(dress_id);
     }
 
-    if inserted > 0 {
-        info!("unlock_live_chara: synthesized {} card_data row(s) for unreleased dresses (fallback)", inserted);
+    if !inserted_card_ids.is_empty() {
+        info!("unlock_live_chara: synthesized {} card_data row(s) for unreleased dresses (fallback)", inserted_card_ids.len());
     }
 
-    inserted
+    (inserted_card_ids, inserted_rarity_ids)
 }
 
 /// Some dresses can have a legitimate `card_data` row pushed by the server ahead of their actual
@@ -599,7 +739,7 @@ fn insert_missing_dress_cards_libnative(conn: *mut Il2CppObject, is_kor: bool) -
 /// `card_rarity_data.card_id` must reference a real `card_data.id`, also synthesize a matching
 /// `card_data` row for that new slot id (mirroring [`insert_missing_dress_cards_rusqlite`]'s
 /// template) so the two tables stay consistent.
-fn ensure_dress_card_rarity_rows_rusqlite(tx: &rusqlite::Transaction, is_kor: bool) -> i32 {
+fn ensure_dress_card_rarity_rows_rusqlite(tx: &rusqlite::Transaction, is_kor: bool) -> (Vec<i32>, Vec<i32>) {
     let mut card_ids: HashSet<i32> = HashSet::new();
     if let Ok(mut stmt) = tx.prepare("SELECT id FROM card_data") {
         if let Ok(rows) = stmt.query_map([], |row| row.get::<_, i32>(0)) {
@@ -629,7 +769,8 @@ fn ensure_dress_card_rarity_rows_rusqlite(tx: &rusqlite::Transaction, is_kor: bo
         }
     }
 
-    let mut inserted = 0;
+    let mut inserted_card_ids = Vec::new();
+    let mut inserted_rarity_ids = Vec::new();
     for dress_id in dress_ids {
         if !card_ids.contains(&dress_id) {
             continue;
@@ -651,7 +792,7 @@ fn ensure_dress_card_rarity_rows_rusqlite(tx: &rusqlite::Transaction, is_kor: bo
             match tx.execute(&card_sql, []) {
                 Ok(_) => {
                     card_ids.insert(existing_card_id);
-                    inserted += 1;
+                    inserted_card_ids.push(existing_card_id);
                     info!("unlock_live_chara: repaired missing card_data id={} for already-covered dress={}", existing_card_id, dress_id);
                 }
                 Err(e) => {
@@ -685,6 +826,7 @@ fn ensure_dress_card_rarity_rows_rusqlite(tx: &rusqlite::Transaction, is_kor: bo
             match tx.execute(&card_sql, []) {
                 Ok(_) => {
                     card_ids.insert(virtual_id);
+                    inserted_card_ids.push(virtual_id);
                 }
                 Err(e) => {
                     warn!("unlock_live_chara: failed to insert placeholder card_data id={} for dress={}: {}", virtual_id, dress_id, e);
@@ -701,7 +843,7 @@ fn ensure_dress_card_rarity_rows_rusqlite(tx: &rusqlite::Transaction, is_kor: bo
         match tx.execute(&rarity_sql, []) {
             Ok(_) => {
                 existing_ids.insert(virtual_id * 100 + 3);
-                inserted += 1;
+                inserted_rarity_ids.push(virtual_id * 100 + 3);
             }
             Err(e) => {
                 warn!("unlock_live_chara: failed to insert card_rarity_data virt={} for dress={}: {}", virtual_id, dress_id, e);
@@ -709,15 +851,15 @@ fn ensure_dress_card_rarity_rows_rusqlite(tx: &rusqlite::Transaction, is_kor: bo
         }
     }
 
-    if inserted > 0 {
-        info!("unlock_live_chara: synthesized {} card_rarity_data row(s) for existing dress cards missing rarity data", inserted);
+    if !inserted_rarity_ids.is_empty() {
+        info!("unlock_live_chara: synthesized {} card_rarity_data row(s) for existing dress cards missing rarity data", inserted_rarity_ids.len());
     }
 
-    inserted
+    (inserted_card_ids, inserted_rarity_ids)
 }
 
 /// Same as [`ensure_dress_card_rarity_rows_rusqlite`] but for the LibNative connection fallback path.
-fn ensure_dress_card_rarity_rows_libnative(conn: *mut Il2CppObject, is_kor: bool) -> i32 {
+fn ensure_dress_card_rarity_rows_libnative(conn: *mut Il2CppObject, is_kor: bool) -> (Vec<i32>, Vec<i32>) {
     let mut card_ids: HashSet<i32> = HashSet::new();
     let query = Connection::Query(conn, "SELECT id FROM card_data".to_il2cpp_string());
     if !query.is_null() {
@@ -750,7 +892,8 @@ fn ensure_dress_card_rarity_rows_libnative(conn: *mut Il2CppObject, is_kor: bool
         Query::Dispose(query3);
     }
 
-    let mut inserted = 0;
+    let mut inserted_card_ids = Vec::new();
+    let mut inserted_rarity_ids = Vec::new();
     for dress_id in dress_ids {
         if !card_ids.contains(&dress_id) {
             continue;
@@ -769,7 +912,7 @@ fn ensure_dress_card_rarity_rows_libnative(conn: *mut Il2CppObject, is_kor: bool
             match run_sql(conn, card_sql) {
                 Some(changes) if changes > 0 => {
                     card_ids.insert(existing_card_id);
-                    inserted += 1;
+                    inserted_card_ids.push(existing_card_id);
                     info!("unlock_live_chara: repaired missing card_data id={} for already-covered dress={} (fallback)", existing_card_id, dress_id);
                 }
                 _ => {
@@ -798,6 +941,7 @@ fn ensure_dress_card_rarity_rows_libnative(conn: *mut Il2CppObject, is_kor: bool
             match run_sql(conn, card_sql) {
                 Some(changes) if changes > 0 => {
                     card_ids.insert(virtual_id);
+                    inserted_card_ids.push(virtual_id);
                 }
                 _ => {
                     warn!("unlock_live_chara: failed to insert placeholder card_data id={} for dress={} (fallback)", virtual_id, dress_id);
@@ -814,7 +958,7 @@ fn ensure_dress_card_rarity_rows_libnative(conn: *mut Il2CppObject, is_kor: bool
         match run_sql(conn, rarity_sql) {
             Some(changes) if changes > 0 => {
                 existing_ids.insert(virtual_id * 100 + 3);
-                inserted += 1;
+                inserted_rarity_ids.push(virtual_id * 100 + 3);
             }
             _ => {
                 warn!("unlock_live_chara: failed to insert card_rarity_data virt={} for dress={} (fallback)", virtual_id, dress_id);
@@ -822,14 +966,24 @@ fn ensure_dress_card_rarity_rows_libnative(conn: *mut Il2CppObject, is_kor: bool
         }
     }
 
-    if inserted > 0 {
-        info!("unlock_live_chara: synthesized {} card_rarity_data row(s) for existing dress cards missing rarity data (fallback)", inserted);
+    if !inserted_rarity_ids.is_empty() {
+        info!("unlock_live_chara: synthesized {} card_rarity_data row(s) for existing dress cards missing rarity data (fallback)", inserted_rarity_ids.len());
     }
 
-    inserted
+    (inserted_card_ids, inserted_rarity_ids)
 }
 
-fn patch_unlock_db_rusqlite(db_path: &str, now: i64, start_ts: i64, is_kor: bool) -> Option<(i32, i32, i32, i32, i32, i32, i32)> {
+type PatchUnlockDbStats = (i32, i32, i32, i32, i32, i32, i32, Vec<i32>, Vec<i32>);
+
+// Only force-unlock dress/live/chara rows whose original release date is within this many days
+// from now. Content scheduled further out was very likely added in the latest data update and
+// may not have its assets deployed to the CDN yet, which was found to trigger the Live menu's
+// network error dialog when force-unlocked. Rows outside the window are left untouched (still
+// locked) until their start date naturally falls inside the window on a later launch.
+const UNLOCK_LIVE_CHARA_GRACE_DAYS: i64 = 0;
+const UNLOCK_LIVE_CHARA_SYNTHETIC_DRESS_CARDS: bool = false;
+
+fn patch_unlock_db_rusqlite(db_path: &str, now: i64, start_ts: i64, is_kor: bool) -> Option<PatchUnlockDbStats> {
     let conn = RusqliteConnection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -865,15 +1019,12 @@ fn patch_unlock_db_rusqlite(db_path: &str, now: i64, start_ts: i64, is_kor: bool
 
     let tx = conn.unchecked_transaction().ok()?;
 
+    // Only unlock already-released content (start_time <= now), never touch future dates to avoid exposing undeployed assets.
     let mut total_changes = 0i32;
     let statements = [
-        "UPDATE dress_data SET use_live = 1, use_live_theater = 1".to_string(),
-        format!("UPDATE dress_data SET start_time = {} WHERE start_time > {}", start_ts, now),
-        "UPDATE dress_data SET general_purpose = 1, costume_type = 1 WHERE id >= 200000 AND id <= 299999 AND body_type = 100".to_string(),
-        "UPDATE dress_data SET body_type = 230 WHERE id > 299999 AND body_type = 100".to_string(),
-        "UPDATE dress_data SET body_type = 230 WHERE id LIKE '1___60'".to_string(),
-        format!("UPDATE live_data SET start_date = {} WHERE has_live = 1 AND start_date > {}", start_ts, now),
-        format!("UPDATE chara_data SET start_date = {} WHERE start_date > {}", start_ts, now),
+        format!("UPDATE dress_data SET use_live = 1, use_live_theater = 1 WHERE start_time <= {}", now),
+        format!("UPDATE live_data SET start_date = {} WHERE has_live = 1 AND start_date > 0 AND start_date <= {}", start_ts, now),
+        format!("UPDATE chara_data SET start_date = {} WHERE start_date > 0 AND start_date <= {}", start_ts, now),
         "UPDATE chara_data SET shape = 1 WHERE id = 9001".to_string(),
     ];
 
@@ -887,8 +1038,8 @@ fn patch_unlock_db_rusqlite(db_path: &str, now: i64, start_ts: i64, is_kor: bool
         }
     }
 
-    let cards_inserted = insert_missing_dress_cards_rusqlite(&tx, is_kor)
-        + ensure_dress_card_rarity_rows_rusqlite(&tx, is_kor);
+    let (synthetic_card_ids, synthetic_rarity_ids) = (Vec::new(), Vec::new());
+    let cards_inserted = 0i32;
 
     if tx.commit().is_err() {
         return None;
@@ -902,6 +1053,8 @@ fn patch_unlock_db_rusqlite(db_path: &str, now: i64, start_ts: i64, is_kor: bool
         pre_chara_future,
         pre_shape_9001,
         cards_inserted,
+        synthetic_card_ids,
+        synthetic_rarity_ids,
     ))
 }
 
@@ -914,6 +1067,12 @@ fn patch_unlock_db_once() {
     let start_ts = 1_483_196_400i64;
     let is_kor = Hachimi::instance().game.region == Region::Korea;
     let mut patched_paths: Vec<String> = Vec::new();
+
+    info!(
+        "unlock_live_chara: mode released_only=true (only unlock already-released content) grace_days={} synth_cards={}",
+        UNLOCK_LIVE_CHARA_GRACE_DAYS,
+        UNLOCK_LIVE_CHARA_SYNTHETIC_DRESS_CARDS
+    );
 
     for candidate in build_masterdb_write_candidates() {
         ensure_master_orig(&candidate);
@@ -930,6 +1089,8 @@ fn patch_unlock_db_once() {
             pre_chara_future,
             pre_shape_9001,
             cards_inserted,
+            synthetic_card_ids,
+            synthetic_rarity_ids,
         )) = patch_unlock_db_rusqlite(&candidate, now, start_ts, is_kor) {
             info!(
                 "unlock_live_chara: patch stats db='{}' open_mode=rusqlite total_changes={} cards_inserted={} pre[dress_unlockable={},dress_future={},live_future={},chara_future={},shape9001={}]",
@@ -942,6 +1103,10 @@ fn patch_unlock_db_once() {
                 pre_chara_future,
                 pre_shape_9001
             );
+            save_unlock_state(&candidate, &UnlockDbState {
+                synthetic_card_ids,
+                synthetic_rarity_ids,
+            });
             patched_paths.push(candidate);
             continue;
         }
@@ -965,13 +1130,9 @@ fn patch_unlock_db_once() {
         let mut total_changes = 0;
         let mut ok = true;
         for sql in [
-            "UPDATE dress_data SET use_live = 1, use_live_theater = 1".to_string(),
-            format!("UPDATE dress_data SET start_time = {} WHERE start_time > {}", start_ts, now),
-            "UPDATE dress_data SET general_purpose = 1, costume_type = 1 WHERE id >= 200000 AND id <= 299999 AND body_type = 100".to_string(),
-            "UPDATE dress_data SET body_type = 230 WHERE id > 299999 AND body_type = 100".to_string(),
-            "UPDATE dress_data SET body_type = 230 WHERE id LIKE '1___60'".to_string(),
-            format!("UPDATE live_data SET start_date = {} WHERE has_live = 1 AND start_date > {}", start_ts, now),
-            format!("UPDATE chara_data SET start_date = {} WHERE start_date > {}", start_ts, now),
+            format!("UPDATE dress_data SET use_live = 1, use_live_theater = 1 WHERE start_time <= {}", now),
+            format!("UPDATE live_data SET start_date = {} WHERE has_live = 1 AND start_date > 0 AND start_date <= {}", start_ts, now),
+            format!("UPDATE chara_data SET start_date = {} WHERE start_date > 0 AND start_date <= {}", start_ts, now),
             "UPDATE chara_data SET shape = 1 WHERE id = 9001".to_string(),
         ] {
             match run_sql(conn, sql.clone()) {
@@ -986,27 +1147,24 @@ fn patch_unlock_db_once() {
             }
         }
 
-        let cards_inserted = if ok {
-            insert_missing_dress_cards_libnative(conn, is_kor) + ensure_dress_card_rarity_rows_libnative(conn, is_kor)
-        } else {
-            0
-        };
-
         Connection::CloseDB(conn);
 
         if ok {
             info!(
-                "unlock_live_chara: patch stats db='{}' open_mode={} total_changes={} cards_inserted={} pre[dress_unlockable={},dress_future={},live_future={},chara_future={},shape9001={}]",
+                "unlock_live_chara: patch stats db='{}' open_mode={} total_changes={} cards_inserted=0 pre[dress_unlockable={},dress_future={},live_future={},chara_future={},shape9001={}]",
                 candidate,
                 if opened_default { 0 } else { 1 },
                 total_changes,
-                cards_inserted,
                 pre_dress_unlockable,
                 pre_dress_future,
                 pre_live_future,
                 pre_chara_future,
                 pre_shape_9001
             );
+            save_unlock_state(&candidate, &UnlockDbState {
+                synthetic_card_ids: Vec::new(),
+                synthetic_rarity_ids: Vec::new(),
+            });
             patched_paths.push(candidate);
         }
     }
@@ -1178,185 +1336,23 @@ fn sanitize_filename_component(input: &str) -> String {
     }
 }
 
-fn patch_unlock_live_chara_response(data: &[u8]) -> Option<Vec<u8>> {
+fn patch_unlock_live_chara_response(_data: &[u8]) -> Option<Vec<u8>> {
+    // Runs once per launch regardless of the flag below, so a previous session's forced-past
+    // dates/synthesized rows get cleaned up even if the user has since turned this option off.
+    ensure_unlock_db_maintenance_once();
+
     if !Hachimi::instance().config.load().unlock_live_chara {
         return None;
     }
 
+    // 2026-08-24: forcing ALL future dress/live/chara_data dates into the past triggered the Live
+    // menu's network error dialog (confirmed by disabling this call entirely - error went away).
+    // patch_unlock_db_rusqlite/LibNative fallback now only force-unlock rows within
+    // UNLOCK_LIVE_CHARA_GRACE_DAYS of now, so very recently-added content without deployed CDN
+    // assets yet stays locked instead of getting exposed.
     patch_unlock_db_once();
 
-    let chara_ids = get_unlock_chara_ids();
-    if chara_ids.is_empty() {
-        return None;
-    }
-
-    let mut root = rmp_serde::from_slice::<Value>(data).ok()?;
-    let data_obj = root.get_mut("data").and_then(|v| v.as_object_mut())?;
-
-    let mut changed = false;
-
-    for key in ["chara_list", "user_chara_list", "user_chara_array"] {
-        let Some(chara_list_value) = data_obj.get_mut(key) else {
-            continue;
-        };
-        if let Some(chara_list) = chara_list_value.as_array() {
-            let mut chara_map = std::collections::BTreeMap::new();
-            for chara in chara_list {
-                if let Some(chara_obj) = chara.as_object() {
-                    if let Some(chara_id) = chara_obj.get("chara_id").and_then(|v| v.as_i64()) {
-                        chara_map.insert(chara_id as i32, chara.clone());
-                    }
-                }
-            }
-
-            let mut patched = Vec::with_capacity(chara_ids.len());
-            for chara_id in &chara_ids {
-                let chara_id = *chara_id;
-                if let Some(existing) = chara_map.get(&chara_id) {
-                    patched.push(existing.clone());
-                }
-                else {
-                    patched.push(json!({
-                        "chara_id": chara_id,
-                        "training_num": 0,
-                        "love_point": 0,
-                        "fan": 1,
-                        "max_grade": 0,
-                        "dress_id": 2,
-                        "mini_dress_id": 2,
-                        "love_point_pool": 0
-                    }));
-                }
-            }
-
-            *chara_list_value = Value::Array(patched);
-            changed = true;
-            break;
-        }
-    }
-
-    for key in ["chara_profile_array", "user_chara_profile_array"] {
-        let Some(profile_value) = data_obj.get_mut(key) else {
-            continue;
-        };
-        if let Some(profile_array) = profile_value.as_array() {
-            let mut profile_map = std::collections::BTreeMap::new();
-            for profile in profile_array {
-                if let Some(profile_obj) = profile.as_object() {
-                    if let Some(chara_id) = profile_obj.get("chara_id").and_then(|v| v.as_i64()) {
-                        profile_map.insert(chara_id as i32, profile.clone());
-                    }
-                }
-            }
-
-            let mut patched = Vec::with_capacity(chara_ids.len());
-            for chara_id in &chara_ids {
-                let chara_id = *chara_id;
-                if let Some(existing) = profile_map.get(&chara_id) {
-                    patched.push(existing.clone());
-                }
-                else {
-                    patched.push(json!({
-                        "chara_id": chara_id,
-                        "data_id": 1,
-                        "new_flag": 0
-                    }));
-                }
-            }
-
-            *profile_value = Value::Array(patched);
-            changed = true;
-            break;
-        }
-    }
-
-    let dress_ids = get_unlock_dress_ids();
-    if !dress_ids.is_empty() {
-        for key in ["cloth_list", "user_cloth_list", "user_dress_list"] {
-            let Some(cloth_list_value) = data_obj.get_mut(key) else {
-                continue;
-            };
-            if cloth_list_value.as_array().is_some() {
-                let mut patched = Vec::with_capacity(dress_ids.len());
-                for dress_id in &dress_ids {
-                    patched.push(json!({
-                        "cloth_id": *dress_id
-                    }));
-                }
-
-                *cloth_list_value = Value::Array(patched);
-                changed = true;
-                break;
-            }
-        }
-    }
-
-    let card_rows = get_unlock_card_rows();
-    if !card_rows.is_empty() {
-        for key in ["release_card_array", "user_release_card_array"] {
-            let Some(release_cards_value) = data_obj.get_mut(key) else {
-                continue;
-            };
-            if release_cards_value.as_array().is_some() {
-                let mut patched = Vec::with_capacity(card_rows.len());
-                for (card_id, _) in &card_rows {
-                    patched.push(json!(*card_id));
-                }
-
-                *release_cards_value = Value::Array(patched);
-                changed = true;
-                break;
-            }
-        }
-
-        for key in ["card_list", "user_card_list"] {
-            let Some(card_list_value) = data_obj.get_mut(key) else {
-                continue;
-            };
-            if let Some(card_list) = card_list_value.as_array() {
-                let mut card_map = std::collections::BTreeMap::new();
-                for card in card_list {
-                    if let Some(card_obj) = card.as_object() {
-                        if let Some(card_id) = card_obj.get("card_id").and_then(|v| v.as_i64()) {
-                            card_map.insert(card_id as i32, card.clone());
-                        }
-                    }
-                }
-
-                let mut patched = Vec::with_capacity(card_rows.len());
-                for (card_id, default_rarity) in &card_rows {
-                    if let Some(existing) = card_map.get(card_id) {
-                        let mut obj = existing.as_object().cloned().unwrap_or_default();
-                        let rarity = obj.get("rarity").and_then(|v| v.as_i64()).unwrap_or(*default_rarity as i64);
-                        if rarity < 3 {
-                            obj.insert("rarity".to_string(), json!(3));
-                        }
-                        patched.push(Value::Object(obj));
-                    }
-                    else {
-                        patched.push(json!({
-                            "null": 1,
-                            "card_id": *card_id,
-                            "rarity": *default_rarity,
-                            "talent_level": 1,
-                            "create_time": "2022-07-01 12:00:00",
-                            "skill_data_array": []
-                        }));
-                    }
-                }
-
-                *card_list_value = Value::Array(patched);
-                changed = true;
-                break;
-            }
-        }
-    }
-
-    if !changed {
-        return None;
-    }
-
-    rmp_serde::to_vec(&root).ok()
+    None
 }
 
 fn make_byte_array(bytes: &[u8]) -> Option<*mut Il2CppArray> {
