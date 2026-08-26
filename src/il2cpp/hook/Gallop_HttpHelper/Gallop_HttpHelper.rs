@@ -872,7 +872,7 @@ fn patch_unlock_db_rusqlite(db_path: &str, now: i64, start_ts: i64, is_kor: bool
         "UPDATE dress_data SET general_purpose = 1, costume_type = 1 WHERE id >= 200000 AND id <= 299999 AND body_type = 100".to_string(),
         "UPDATE dress_data SET body_type = 230 WHERE id > 299999 AND body_type = 100".to_string(),
         "UPDATE dress_data SET body_type = 230 WHERE id LIKE '1___60'".to_string(),
-        format!("UPDATE live_data SET start_date = {} WHERE has_live = 1 AND start_date > {}", start_ts, now),
+        // Disabled live unlock SQL to avoid requesting live resources not yet published by server.
         format!("UPDATE chara_data SET start_date = {} WHERE start_date > {}", start_ts, now),
         "UPDATE chara_data SET shape = 1 WHERE id = 9001".to_string(),
     ];
@@ -970,7 +970,7 @@ fn patch_unlock_db_once() {
             "UPDATE dress_data SET general_purpose = 1, costume_type = 1 WHERE id >= 200000 AND id <= 299999 AND body_type = 100".to_string(),
             "UPDATE dress_data SET body_type = 230 WHERE id > 299999 AND body_type = 100".to_string(),
             "UPDATE dress_data SET body_type = 230 WHERE id LIKE '1___60'".to_string(),
-            format!("UPDATE live_data SET start_date = {} WHERE has_live = 1 AND start_date > {}", start_ts, now),
+            // Disabled live unlock SQL to avoid requesting live resources not yet published by server.
             format!("UPDATE chara_data SET start_date = {} WHERE start_date > {}", start_ts, now),
             "UPDATE chara_data SET shape = 1 WHERE id = 9001".to_string(),
         ] {
