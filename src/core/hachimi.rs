@@ -85,7 +85,10 @@ pub struct Hachimi {
     #[cfg(target_os = "windows")]
     pub discord_rpc: AtomicBool,
 
-    pub updater: Arc<updater::Updater>
+    pub updater: Arc<updater::Updater>,
+
+    #[cfg(target_os = "windows")]
+    pub gui_lazy_initialized: AtomicBool
 }
 
 static INSTANCE: OnceCell<Arc<Hachimi>> = OnceCell::new();
@@ -184,6 +187,9 @@ impl Hachimi {
             discord_rpc: AtomicBool::new(config.windows.discord_rpc),
 
             updater: Arc::default(),
+
+            #[cfg(target_os = "windows")]
+            gui_lazy_initialized: AtomicBool::new(false),
 
             config: ArcSwap::new(Arc::new(config))
         })
@@ -408,11 +414,18 @@ impl Hachimi {
         il2cpp::symbols::init();
         il2cpp::hook::init();
 
+        #[cfg(target_os = "windows")]
+        let is_late_loading = crate::windows::hook::is_late_loading();
+        #[cfg(not(target_os = "windows"))]
+        let is_late_loading = false;
+
         // By the time it finished hooking the game will have already finished initializing
-        GameSystem::on_game_initialized();
+        if !is_late_loading {
+            GameSystem::on_game_initialized();
+        }
 
         let config = self.config.load();
-        if !config.disable_gui {
+        if !config.disable_gui && !is_late_loading {
             gui_impl::init();
         }
 
@@ -638,6 +651,16 @@ impl Hachimi {
                 }
             })
             .expect("Failed to spawn translation updater thread");
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn try_lazy_init_gui(&self) {
+        if self.gui_lazy_initialized.swap(true, atomic::Ordering::Relaxed) {
+            return;
+        }
+
+        info!("Lazy initializing GUI on first menu key press");
+        gui_impl::init();
     }
 }
 

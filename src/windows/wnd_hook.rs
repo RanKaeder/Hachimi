@@ -514,6 +514,7 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
                 }
 
                 if current_key == Hachimi::instance().config.load().windows.menu_open_key {
+                    Hachimi::instance().try_lazy_init_gui();
                     let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
                         return unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
                     };
