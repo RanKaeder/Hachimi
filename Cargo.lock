@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "hachimi"
-version = "0.31.2"
+version = "0.31.2-mods"
 dependencies = [
  "android_logger",
  "arc-swap",
