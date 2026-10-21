@@ -1177,6 +1177,54 @@ fn sanitize_filename_component(input: &str) -> String {
     }
 }
 
+fn msgpack_value_to_json(value: &rmpv::Value) -> Value {
+    match value {
+        rmpv::Value::Nil => Value::Null,
+        rmpv::Value::Boolean(value) => json!(value),
+        rmpv::Value::Integer(value) => value
+            .as_i64()
+            .map(|value| json!(value))
+            .or_else(|| value.as_u64().map(|value| json!(value)))
+            .unwrap_or(Value::Null),
+        rmpv::Value::F32(value) => serde_json::Number::from_f64(*value as f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        rmpv::Value::F64(value) => serde_json::Number::from_f64(*value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        rmpv::Value::String(value) => value
+            .as_str()
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+        rmpv::Value::Binary(values) => {
+            Value::Array(values.iter().map(|value| json!(value)).collect())
+        }
+        rmpv::Value::Array(values) => {
+            Value::Array(values.iter().map(msgpack_value_to_json).collect())
+        }
+        rmpv::Value::Map(entries) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in entries {
+                let key = match key {
+                    rmpv::Value::String(key) => key.as_str().unwrap_or("<invalid-utf8>").to_string(),
+                    rmpv::Value::Nil => "null".to_string(),
+                    _ => serde_json::to_string(&msgpack_value_to_json(key))
+                        .unwrap_or_else(|_| "<unsupported-key>".to_string()),
+                };
+                object.insert(key, msgpack_value_to_json(value));
+            }
+            Value::Object(object)
+        }
+        rmpv::Value::Ext(_, _) => Value::Null,
+    }
+}
+
+fn decode_msgpack_json(data: &[u8]) -> Option<Value> {
+    let mut reader = data;
+    let value = rmpv::decode::read_value(&mut reader).ok()?;
+    Some(msgpack_value_to_json(&value))
+}
+
 fn patch_unlock_live_chara_response(data: &[u8]) -> Option<Vec<u8>> {
     if !Hachimi::instance().config.load().unlock_live_chara {
         return None;
@@ -1189,7 +1237,7 @@ fn patch_unlock_live_chara_response(data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut root = rmp_serde::from_slice::<Value>(data).ok()?;
+    let mut root = decode_msgpack_json(data)?;
     let data_obj = root.get_mut("data").and_then(|v| v.as_object_mut())?;
 
     let mut changed = false;
